@@ -10,6 +10,20 @@ from .models import (TaggedItem, ValuableTaggedItem, Comparison, Animal,
 
 
 class GenericRelationsTests(TestCase):
+
+    def test_generic_relations_values_list(self):
+        animal = Animal.objects.create()
+        animal_ct = ContentType.objects.get_for_model(Animal)
+        vegetable = Vegetable.objects.create()
+        vegetable_ct = ContentType.objects.get_for_model(Vegetable)
+        t1 = TaggedItem.objects.create(
+            content_type=animal_ct, object_id=animal.id)
+        t2 = TaggedItem.objects.create(
+            content_type=vegetable_ct, object_id=vegetable.id)
+        animal_tag_ids = Animal.objects.values_list('tags', flat=1)
+        self.assertIn(t1.id, animal_tag_ids)
+        self.assertNotIn(t2.id, animal_tag_ids)
+
     def test_generic_relations(self):
         # Create the world in 7 lines of code...
         lion = Animal.objects.create(common_name="Lion", latin_name="Panthera leo")
