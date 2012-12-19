@@ -219,6 +219,15 @@ GeoDjango
 * Support for PostGIS 2.0 has been added and support for GDAL < 1.5 has been
   dropped.
 
+New tutorials
+~~~~~~~~~~~~~
+
+Additions to the docs include a revamped :doc:`Tutorial 3</intro/tutorial03>`
+and a new :doc:`tutorial on testing</intro/tutorial05>`. A new section,
+"Advanced Tutorials", offers :doc:`How to write reusable apps
+</intro/reusable-apps>` as well as a step-by-step guide for new contributors in
+:doc:`Writing your first patch for Django </intro/contributing>`.
+
 Minor features
 ~~~~~~~~~~~~~~
 
@@ -331,6 +340,21 @@ Backwards incompatible changes in 1.5
     have been removed. If you haven't updated your code within the
     deprecation timeline for a given feature, its removal may appear as a
     backwards incompatible change.
+
+Managers on abstract models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Abstract models are able to define a custom manager, and that manager
+:ref:`will be inherited by any concrete models extending the abstract model
+<custom-managers-and-inheritance>`. However, if you try to use the abstract
+model to call a method on the manager, an exception will now be raised.
+Previously, the call would have been permitted, but would have failed as soon
+as any database operation was attempted (usually with a "table does not exist"
+error from the database).
+
+If you have functionality on a manager that you have been invoking using
+the abstract class, you should migrate that logic to a Python
+``staticmethod`` or ``classmethod`` on the abstract class.
 
 Context in year archive class-based views
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

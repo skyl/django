@@ -431,10 +431,12 @@ MySQL will connect via a Unix socket to the specified socket. For example::
 If you're using MySQL and this value *doesn't* start with a forward slash, then
 this value is assumed to be the host.
 
-If you're using PostgreSQL, an empty string means to use a Unix domain socket
-for the connection, rather than a network connection to localhost. If you
-explicitly need to use a TCP/IP connection on the local machine with
-PostgreSQL, specify ``localhost`` here.
+If you're using PostgreSQL, by default (empty :setting:`HOST`), the connection
+to the database is done through UNIX domain sockets ('local' lines in
+``pg_hba.conf``). If you want to connect through TCP sockets, set
+:setting:`HOST` to 'localhost' or '127.0.0.1' ('host' lines in ``pg_hba.conf``).
+On Windows, you should always define :setting:`HOST`, as UNIX domain sockets
+are not available.
 
 .. setting:: NAME
 
@@ -1448,6 +1450,25 @@ format has higher precedence and will be applied instead.
 See also :setting:`DECIMAL_SEPARATOR`, :setting:`THOUSAND_SEPARATOR` and
 :setting:`USE_THOUSAND_SEPARATOR`.
 
+.. setting:: PASSWORD_HASHERS
+
+PASSWORD_HASHERS
+----------------
+
+.. versionadded:: 1.4
+
+See :ref:`auth_password_storage`.
+
+Default::
+
+    ('django.contrib.auth.hashers.PBKDF2PasswordHasher',
+     'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
+     'django.contrib.auth.hashers.BCryptPasswordHasher',
+     'django.contrib.auth.hashers.SHA1PasswordHasher',
+     'django.contrib.auth.hashers.MD5PasswordHasher',
+     'django.contrib.auth.hashers.UnsaltedMD5PasswordHasher',
+     'django.contrib.auth.hashers.CryptPasswordHasher',)
+
 .. setting:: PASSWORD_RESET_TIMEOUT_DAYS
 
 PASSWORD_RESET_TIMEOUT_DAYS
@@ -2066,6 +2087,16 @@ to ensure your processes are running in the correct environment.
 .. _See available choices: http://www.postgresql.org/docs/8.1/static/datetime-keywords.html#DATETIME-TIMEZONE-SET-TABLE
 
 .. _pytz: http://pytz.sourceforge.net/
+
+.. setting:: TRANSACTIONS_MANAGED
+
+TRANSACTIONS_MANAGED
+--------------------
+
+Default: ``False``
+
+Set this to ``True`` if you want to :ref:`disable Django's transaction
+management <deactivate-transaction-management>` and implement your own.
 
 .. setting:: USE_ETAGS
 
