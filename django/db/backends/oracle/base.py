@@ -11,6 +11,7 @@ import re
 import sys
 import warnings
 
+
 def _setup_environment(environ):
     import platform
     # Cygwin requires some special voodoo to set the environment variables
@@ -47,7 +48,10 @@ except ImportError as e:
 
 from django.conf import settings
 from django.db import utils
-from django.db.backends import *
+from django.db.backends import (
+    BaseDatabaseFeatures, BaseDatabaseOperations, BaseDatabaseWrapper,
+    BaseDatabaseValidation, util
+)
 from django.db.backends.signals import connection_created
 from django.db.backends.oracle.client import DatabaseClient
 from django.db.backends.oracle.creation import DatabaseCreation
@@ -59,8 +63,9 @@ from django.utils import timezone
 DatabaseError = Database.DatabaseError
 IntegrityError = Database.IntegrityError
 
-# Check whether cx_Oracle was compiled with the WITH_UNICODE option if cx_Oracle is pre-5.1. This will
-# also be True for cx_Oracle 5.1 and in Python 3.0. See #19606
+# Check whether cx_Oracle was compiled with the WITH_UNICODE option
+# if cx_Oracle is pre-5.1. This will also be True for cx_Oracle 5.1
+# and in Python 3.0. See #19606
 if int(Database.version.split('.', 1)[0]) >= 5 and \
         (int(Database.version.split('.', 2)[1]) >= 1 or
          not hasattr(Database, 'UNICODE')):
@@ -87,6 +92,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     has_bulk_insert = True
     supports_tablespaces = True
     supports_sequence_reset = False
+
 
 class DatabaseOperations(BaseDatabaseOperations):
     compiler_module = "django.db.backends.oracle.compiler"
@@ -307,7 +313,7 @@ WHEN (new.%(col_name)s IS NULL)
         # Oracle puts the query text into a (query % args) construct, so % signs
         # in names need to be escaped. The '%%' will be collapsed back to '%' at
         # that stage so we aren't really making the name longer here.
-        name = name.replace('%','%%')
+        name = name.replace('%', '%%')
         return name.upper()
 
     def random_function_sql(self):
@@ -513,10 +519,36 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         self.introspection = DatabaseIntrospection(self)
         self.validation = BaseDatabaseValidation(self)
 
+        # SessionPool
+        if "SESSION_POOL" in self.settings_dict:
+            pool_settings = self.settings_dict["SESSION_POOL"]
+
+            if self.settings_dict.get('PORT', '').strip():
+                dsn = Database.makedsn(
+                    self.settings_dict['HOST'],
+                    int(self.settings_dict['PORT']),
+                    self.settings_dict.get('NAME', '')
+                )
+            else:
+                dsn = self.settings_dict.get('NAME', '')
+
+            self.pool = Database.SessionPool(
+                self.settings_dict['USER'],
+                self.settings_dict['PASSWORD'],
+                dsn,
+                pool_settings.get('MIN_SESSIONS', 2),
+                pool_settings.get('MAX_SESSIONS', 4),
+                pool_settings.get('INCREMENT', 1),
+                threaded=pool_settings.get('THREADED', True)
+            )
+        else:
+            self.pool = None
+        self.is_pooled = self.pool is not None
+
     def check_constraints(self, table_names=None):
         """
-        To check constraints, we set constraints to immediate. Then, when, we're done we must ensure they
-        are returned to deferred.
+        To check constraints, we set constraints to immediate.
+        Then, when we're done, we must ensure they are returned to deferred.
         """
         self.cursor().execute('SET CONSTRAINTS ALL IMMEDIATE')
         self.cursor().execute('SET CONSTRAINTS ALL DEFERRED')
@@ -544,6 +576,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         conn_params = self.settings_dict['OPTIONS'].copy()
         if 'use_returning_into' in conn_params:
             del conn_params['use_returning_into']
+        conn_params['pool'] = self.pool
         return conn_params
 
     def get_new_connection(self, conn_params):
