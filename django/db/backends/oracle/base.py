@@ -544,6 +544,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         else:
             self.pool = None
         self.is_pooled = self.pool is not None
+        print "DatabaseWrapper __init__"
+        print "pool", self.pool
 
     def check_constraints(self, table_names=None):
         """
@@ -576,7 +578,10 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         conn_params = self.settings_dict['OPTIONS'].copy()
         if 'use_returning_into' in conn_params:
             del conn_params['use_returning_into']
-        conn_params['pool'] = self.pool
+        if self.is_pooled:
+            print "IS POOLED", self.pool
+            conn_params['pool'] = self.pool
+        print "RETURNING CONNECTION PARAMS!"
         return conn_params
 
     def get_new_connection(self, conn_params):
