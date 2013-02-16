@@ -5,7 +5,7 @@ from django.db.backends import util
 from django.db.models import signals, get_model
 from django.db.models.fields import (AutoField, Field, IntegerField,
     PositiveIntegerField, PositiveSmallIntegerField, FieldDoesNotExist)
-from django.db.models.related import RelatedObject
+from django.db.models.related import RelatedObject, PathInfo
 from django.db.models.query import QuerySet
 from django.db.models.query_utils import QueryWrapper
 from django.db.models.deletion import CASCADE
@@ -15,7 +15,6 @@ from django.utils.translation import ugettext_lazy as _, string_concat
 from django.utils.functional import curry, cached_property
 from django.core import exceptions
 from django import forms
-
 
 RECURSIVE_RELATIONSHIP_CONSTANT = 'self'
 
@@ -119,7 +118,7 @@ class RelatedField(object):
             self.do_related_class(other, cls)
 
     def set_attributes_from_rel(self):
-        self.name = self.name or (self.rel.to._meta.object_name.lower() + '_' + self.rel.to._meta.pk.name)
+        self.name = self.name or (self.rel.to._meta.model_name + '_' + self.rel.to._meta.pk.name)
         if self.verbose_name is None:
             self.verbose_name = self.rel.to._meta.verbose_name
         self.rel.field_name = self.rel.field_name or self.rel.to._meta.pk.name
@@ -223,7 +222,7 @@ class RelatedField(object):
         # related object in a table-spanning query. It uses the lower-cased
         # object_name by default, but this can be overridden with the
         # "related_name" option.
-        return self.rel.related_name or self.opts.object_name.lower()
+        return self.rel.related_name or self.opts.model_name
 
 
 class SingleRelatedObjectDescriptor(object):
@@ -497,7 +496,9 @@ class ForeignRelatedObjectsDescriptor(object):
                 except (AttributeError, KeyError):
                     db = self._db or router.db_for_read(self.model, instance=self.instance)
                     qs = super(RelatedManager, self).get_query_set().using(db).filter(**self.core_filters)
-                    qs._known_related_object = (rel_field.name, self.instance)
+                    if getattr(self.instance, attname) is None:
+                        return qs.none()
+                    qs._known_related_objects = {rel_field: {self.instance.pk: self.instance}}
                     return qs
 
             def get_prefetch_query_set(self, instances):
@@ -982,7 +983,7 @@ class ForeignKey(RelatedField, Field):
 
     def __init__(self, to, to_field=None, rel_class=ManyToOneRel, **kwargs):
         try:
-            to_name = to._meta.object_name.lower()
+            to_name = to._meta.model_name
         except AttributeError:  # to._meta doesn't exist, so it must be RECURSIVE_RELATIONSHIP_CONSTANT
             assert isinstance(to, six.string_types), "%s(%r) is invalid. First parameter to ForeignKey must be either a model, a model name, or the string %r" % (self.__class__.__name__, to, RECURSIVE_RELATIONSHIP_CONSTANT)
         else:
@@ -1003,6 +1004,31 @@ class ForeignKey(RelatedField, Field):
             on_delete=kwargs.pop('on_delete', CASCADE),
         )
         Field.__init__(self, **kwargs)
+
+    def get_path_info(self):
+        """
+        Get path from this field to the related model.
+        """
+        opts = self.rel.to._meta
+        target = self.rel.get_related_field()
+        from_opts = self.model._meta
+        return [PathInfo(self, target, from_opts, opts, self, False, True)], opts, target, self
+
+    def get_reverse_path_info(self):
+        """
+        Get path from the related model to this field's model.
+        """
+        opts = self.model._meta
+        from_field = self.rel.get_related_field()
+        from_opts = from_field.model._meta
+        pathinfos = [PathInfo(from_field, self, from_opts, opts, self, not self.unique, False)]
+        if from_field.model is self.model:
+            # Recursive foreign key to self.
+            target = opts.get_field_by_name(
+                self.rel.field_name)[0]
+        else:
+            target = opts.pk
+        return pathinfos, opts, target, self
 
     def validate(self, value, model_instance):
         if self.rel.parent_link:
@@ -1148,7 +1174,7 @@ def create_many_to_many_intermediary_model(field, klass):
         from_ = 'from_%s' % to.lower()
         to = 'to_%s' % to.lower()
     else:
-        from_ = klass._meta.object_name.lower()
+        from_ = klass._meta.model_name
         to = to.lower()
     meta = type('Meta', (object,), {
         'db_table': field._get_m2m_db_table(klass._meta),
@@ -1197,6 +1223,30 @@ class ManyToManyField(RelatedField, Field):
 
         msg = _('Hold down "Control", or "Command" on a Mac, to select more than one.')
         self.help_text = string_concat(self.help_text, ' ', msg)
+
+    def _get_path_info(self, direct=False):
+        """
+        Called by both direct an indirect m2m traversal.
+        """
+        pathinfos = []
+        int_model = self.rel.through
+        linkfield1 = int_model._meta.get_field_by_name(self.m2m_field_name())[0]
+        linkfield2 = int_model._meta.get_field_by_name(self.m2m_reverse_field_name())[0]
+        if direct:
+            join1infos, _, _, _ = linkfield1.get_reverse_path_info()
+            join2infos, opts, target, final_field = linkfield2.get_path_info()
+        else:
+            join1infos, _, _, _ = linkfield2.get_reverse_path_info()
+            join2infos, opts, target, final_field = linkfield1.get_path_info()
+        pathinfos.extend(join1infos)
+        pathinfos.extend(join2infos)
+        return pathinfos, opts, target, final_field
+
+    def get_path_info(self):
+        return self._get_path_info(direct=True)
+
+    def get_reverse_path_info(self):
+        return self._get_path_info(direct=False)
 
     def get_choices_default(self):
         return Field.get_choices(self, include_blank=False)

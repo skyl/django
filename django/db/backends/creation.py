@@ -7,6 +7,8 @@ from django.db.utils import load_backend
 from django.utils.encoding import force_bytes
 from django.utils.six.moves import input
 
+from .util import truncate_name
+
 # The prefix to put on the default database name when creating
 # the test database.
 TEST_DATABASE_PREFIX = 'test_'
@@ -77,7 +79,7 @@ class BaseDatabaseCreation(object):
                     field_output.append(tablespace_sql)
             if f.rel:
                 ref_output, pending = self.sql_for_inline_foreign_key_references(
-                    f, known_models, style)
+                    model, f, known_models, style)
                 if pending:
                     pending_references.setdefault(f.rel.to, []).append(
                         (model, f))
@@ -116,15 +118,16 @@ class BaseDatabaseCreation(object):
 
         return final_output, pending_references
 
-    def sql_for_inline_foreign_key_references(self, field, known_models, style):
+    def sql_for_inline_foreign_key_references(self, model, field, known_models, style):
         """
         Return the SQL snippet defining the foreign key reference for a field.
         """
         qn = self.connection.ops.quote_name
-        if field.rel.to in known_models:
+        rel_to = field.rel.to
+        if rel_to in known_models or rel_to == model:
             output = [style.SQL_KEYWORD('REFERENCES') + ' ' +
-                style.SQL_TABLE(qn(field.rel.to._meta.db_table)) + ' (' +
-                style.SQL_FIELD(qn(field.rel.to._meta.get_field(
+                style.SQL_TABLE(qn(rel_to._meta.db_table)) + ' (' +
+                style.SQL_FIELD(qn(rel_to._meta.get_field(
                     field.rel.field_name).column)) + ')' +
                 self.connection.ops.deferrable_sql()
             ]
@@ -141,8 +144,6 @@ class BaseDatabaseCreation(object):
         """
         Returns any ALTER TABLE statements to add constraints after the fact.
         """
-        from django.db.backends.util import truncate_name
-
         opts = model._meta
         if not opts.managed or opts.proxy or opts.swapped:
             return []
@@ -192,8 +193,6 @@ class BaseDatabaseCreation(object):
             return []
 
     def sql_indexes_for_fields(self, model, fields, style):
-        from django.db.backends.util import truncate_name
-
         if len(fields) == 1 and fields[0].db_tablespace:
             tablespace_sql = self.connection.ops.tablespace_sql(fields[0].db_tablespace)
         elif model._meta.db_tablespace:
@@ -240,7 +239,6 @@ class BaseDatabaseCreation(object):
         return output
 
     def sql_remove_table_constraints(self, model, references_to_delete, style):
-        from django.db.backends.util import truncate_name
         if not model._meta.managed or model._meta.proxy or model._meta.swapped:
             return []
         output = []

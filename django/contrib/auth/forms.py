@@ -57,6 +57,9 @@ class ReadOnlyPasswordHashField(forms.Field):
         # render an input field.
         return initial
 
+    def _has_changed(self, initial, data):
+        return False
+
 
 class UserCreationForm(forms.ModelForm):
     """
@@ -89,7 +92,7 @@ class UserCreationForm(forms.ModelForm):
         # but it sets a nicer error message than the ORM. See #13147.
         username = self.cleaned_data["username"]
         try:
-            User.objects.get(username=username)
+            User._default_manager.get(username=username)
         except User.DoesNotExist:
             return username
         raise forms.ValidationError(self.error_messages['duplicate_username'])
@@ -169,7 +172,8 @@ class AuthenticationForm(forms.Form):
         # Set the label for the "username" field.
         UserModel = get_user_model()
         self.username_field = UserModel._meta.get_field(UserModel.USERNAME_FIELD)
-        self.fields['username'].label = capfirst(self.username_field.verbose_name)
+        if not self.fields['username'].label:
+            self.fields['username'].label = capfirst(self.username_field.verbose_name)
 
     def clean(self):
         username = self.cleaned_data.get('username')
@@ -216,7 +220,7 @@ class PasswordResetForm(forms.Form):
         """
         UserModel = get_user_model()
         email = self.cleaned_data["email"]
-        self.users_cache = UserModel.objects.filter(email__iexact=email)
+        self.users_cache = UserModel._default_manager.filter(email__iexact=email)
         if not len(self.users_cache):
             raise forms.ValidationError(self.error_messages['unknown'])
         if not any(user.is_active for user in self.users_cache):

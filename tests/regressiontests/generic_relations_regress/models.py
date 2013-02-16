@@ -6,7 +6,7 @@ from django.utils.encoding import python_2_unicode_compatible
 
 __all__ = ('Link', 'Place', 'Restaurant', 'Person', 'Address',
            'CharLink', 'TextLink', 'OddRelation1', 'OddRelation2',
-           'Contact', 'Organization', 'Note')
+           'Contact', 'Organization', 'Note', 'Company')
 
 @python_2_unicode_compatible
 class Link(models.Model):
@@ -84,3 +84,41 @@ class Organization(models.Model):
     name = models.CharField(max_length=255)
     contacts = models.ManyToManyField(Contact, related_name='organizations')
 
+@python_2_unicode_compatible
+class Company(models.Model):
+    name = models.CharField(max_length=100)
+    links = generic.GenericRelation(Link)
+
+    def __str__(self):
+        return "Company: %s" % self.name
+
+# For testing #13085 fix, we also use Note model defined above
+class Developer(models.Model):
+    name = models.CharField(max_length=15)
+
+@python_2_unicode_compatible
+class Team(models.Model):
+    name = models.CharField(max_length=15)
+    members = models.ManyToManyField(Developer)
+
+    def __str__(self):
+        return "%s team" % self.name
+
+    def __len__(self):
+        return self.members.count()
+
+class Guild(models.Model):
+    name = models.CharField(max_length=15)
+    members = models.ManyToManyField(Developer)
+
+    def __nonzero__(self):
+        return self.members.count()
+
+class Tag(models.Model):
+    content_type = models.ForeignKey(ContentType, related_name='g_r_r_tags')
+    object_id = models.CharField(max_length=15)
+    content_object = generic.GenericForeignKey()
+    label = models.CharField(max_length=15)
+
+class Board(models.Model):
+    name = models.CharField(primary_key=True, max_length=15)

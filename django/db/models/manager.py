@@ -1,6 +1,6 @@
 import copy
 from django.db import router
-from django.db.models.query import QuerySet, EmptyQuerySet, insert_query, RawQuerySet
+from django.db.models.query import QuerySet, insert_query, RawQuerySet
 from django.db.models import signals
 from django.db.models.fields import FieldDoesNotExist
 
@@ -112,9 +112,6 @@ class Manager(object):
     # PROXIES TO QUERYSET #
     #######################
 
-    def get_empty_query_set(self):
-        return EmptyQuerySet(self.model, using=self._db)
-
     def get_query_set(self):
         """Returns a new QuerySet object.  Subclasses can override this method
         to easily customize the behavior of the Manager.
@@ -122,7 +119,7 @@ class Manager(object):
         return QuerySet(self.model, using=self._db)
 
     def none(self):
-        return self.get_empty_query_set()
+        return self.get_query_set().none()
 
     def all(self):
         return self.get_query_set()
@@ -132,6 +129,9 @@ class Manager(object):
 
     def dates(self, *args, **kwargs):
         return self.get_query_set().dates(*args, **kwargs)
+
+    def datetimes(self, *args, **kwargs):
+        return self.get_query_set().datetimes(*args, **kwargs)
 
     def distinct(self, *args, **kwargs):
         return self.get_query_set().distinct(*args, **kwargs)
@@ -171,6 +171,9 @@ class Manager(object):
 
     def iterator(self, *args, **kwargs):
         return self.get_query_set().iterator(*args, **kwargs)
+
+    def earliest(self, *args, **kwargs):
+        return self.get_query_set().earliest(*args, **kwargs)
 
     def latest(self, *args, **kwargs):
         return self.get_query_set().latest(*args, **kwargs)
@@ -258,5 +261,9 @@ class SwappedManagerDescriptor(object):
 
 
 class EmptyManager(Manager):
+    def __init__(self, model):
+        super(EmptyManager, self).__init__()
+        self.model = model
+
     def get_query_set(self):
-        return self.get_empty_query_set()
+        return super(EmptyManager, self).get_query_set().none()

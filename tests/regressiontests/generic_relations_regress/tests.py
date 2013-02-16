@@ -1,8 +1,10 @@
 from django.db.models import Q
+from django.db.utils import IntegrityError
 from django.test import TestCase
 
 from .models import (Address, Place, Restaurant, Link, CharLink, TextLink,
-    Person, Contact, Note, Organization, OddRelation1, OddRelation2)
+    Person, Contact, Note, Organization, OddRelation1, OddRelation2, Company,
+    Developer, Team, Guild, Tag, Board)
 
 
 class GenericRelationTests(TestCase):
@@ -72,5 +74,63 @@ class GenericRelationTests(TestCase):
             Q(notes__note__icontains=r'other note'))
         self.assertTrue(org_contact in qs)
 
+    def test_join_reuse(self):
+        qs = Person.objects.filter(
+            addresses__street='foo'
+        ).filter(
+            addresses__street='bar'
+        )
+        self.assertEqual(str(qs.query).count('JOIN'), 2)
 
+    def test_generic_relation_ordering(self):
+        """
+        Test that ordering over a generic relation does not include extraneous
+        duplicate results, nor excludes rows not participating in the relation.
+        """
+        p1 = Place.objects.create(name="South Park")
+        p2 = Place.objects.create(name="The City")
+        c = Company.objects.create(name="Chubby's Intl.")
+        l1 = Link.objects.create(content_object=p1)
+        l2 = Link.objects.create(content_object=c)
 
+        places = list(Place.objects.order_by('links__id'))
+        def count_places(place):
+            return len([p for p in places if p.id == place.id])
+
+        self.assertEqual(len(places), 2)
+        self.assertEqual(count_places(p1), 1)
+        self.assertEqual(count_places(p2), 1)
+
+    def test_target_model_is_unsaved(self):
+        """Test related to #13085"""
+        # Fails with another, ORM-level error
+        dev1 = Developer(name='Joe')
+        note = Note(note='Deserves promotion', content_object=dev1)
+        self.assertRaises(IntegrityError, note.save)
+
+    def test_target_model_len_zero(self):
+        """Test for #13085 -- __len__() returns 0"""
+        team1 = Team.objects.create(name='Backend devs')
+        try:
+            note = Note(note='Deserve a bonus', content_object=team1)
+        except Exception as e:
+            if issubclass(type(e), Exception) and str(e) == 'Impossible arguments to GFK.get_content_type!':
+                self.fail("Saving model with GenericForeignKey to model instance whose __len__ method returns 0 shouldn't fail.")
+            raise e
+        note.save()
+
+    def test_target_model_nonzero_false(self):
+        """Test related to #13085"""
+        # __nonzero__() returns False -- This actually doesn't currently fail.
+        # This test validates that
+        g1 = Guild.objects.create(name='First guild')
+        note = Note(note='Note for guild', content_object=g1)
+        note.save()
+
+    def test_gfk_to_model_with_empty_pk(self):
+        """Test related to #13085"""
+        # Saving model with GenericForeignKey to model instance with an
+        # empty CharField PK
+        b1 = Board.objects.create(name='')
+        tag = Tag(label='VP', content_object=b1)
+        tag.save()

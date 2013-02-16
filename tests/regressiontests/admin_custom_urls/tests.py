@@ -1,5 +1,4 @@
 from __future__ import absolute_import, unicode_literals
-
 import warnings
 
 from django.contrib.admin.util import quote
@@ -8,7 +7,7 @@ from django.template.response import TemplateResponse
 from django.test import TestCase
 from django.test.utils import override_settings
 
-from .models import Action, Person, City
+from .models import Action, Person, Car
 
 
 @override_settings(PASSWORD_HASHERS=('django.contrib.auth.hashers.SHA1PasswordHasher',))
@@ -86,8 +85,8 @@ class AdminCustomUrlsTest(TestCase):
 
 
 @override_settings(PASSWORD_HASHERS=('django.contrib.auth.hashers.SHA1PasswordHasher',))
-class CustomUrlsWorkflowTests(TestCase):
-    fixtures = ['users.json']
+class CustomRedirects(TestCase):
+    fixtures = ['users.json', 'actions.json']
 
     def setUp(self):
         self.client.login(username='super', password='secret')
@@ -95,33 +94,48 @@ class CustomUrlsWorkflowTests(TestCase):
     def tearDown(self):
         self.client.logout()
 
-    def test_old_argument_deprecation(self):
-        """Test reporting of post_url_continue deprecation."""
-        post_data = {
-            'nick': 'johndoe',
-        }
-        cnt = Person.objects.count()
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            response = self.client.post(reverse('admin:admin_custom_urls_person_add'), post_data)
-            self.assertEqual(response.status_code, 302)
-            self.assertEqual(Person.objects.count(), cnt + 1)
-            # We should get a DeprecationWarning
-            self.assertEqual(len(w), 1)
-            self.assertTrue(isinstance(w[0].message, DeprecationWarning))
+    def test_post_save_add_redirect(self):
+        """
+        Ensures that ModelAdmin.response_post_save_add() controls the
+        redirection after the 'Save' button has been pressed when adding a
+        new object.
+        Refs 8001, 18310, 19505.
+        """
+        post_data = { 'name': 'John Doe', }
+        self.assertEqual(Person.objects.count(), 0)
+        response = self.client.post(
+            reverse('admin:admin_custom_urls_person_add'), post_data)
+        persons = Person.objects.all()
+        self.assertEqual(len(persons), 1)
+        self.assertRedirects(
+            response, reverse('admin:admin_custom_urls_person_history', args=[persons[0].pk]))
 
-    def test_custom_add_another_redirect(self):
-        """Test customizability of post-object-creation redirect URL."""
-        post_data = {
-            'name': 'Rome',
-            '_addanother': '1',
-        }
-        cnt = City.objects.count()
-        with warnings.catch_warnings(record=True) as w:
-            # POST to the view whose post-object-creation redir URL argument we
-            # are customizing (object creation)
-            response = self.client.post(reverse('admin:admin_custom_urls_city_add'), post_data)
-            self.assertEqual(City.objects.count(), cnt + 1)
-            # Check that it redirected to the URL we set
-            self.assertRedirects(response, reverse('admin:admin_custom_urls_city_changelist'))
-            self.assertEqual(len(w), 0) # We should get no DeprecationWarning
+    def test_post_save_change_redirect(self):
+        """
+        Ensures that ModelAdmin.response_post_save_change() controls the
+        redirection after the 'Save' button has been pressed when editing an
+        existing object.
+        Refs 8001, 18310, 19505.
+        """
+        Person.objects.create(name='John Doe')
+        self.assertEqual(Person.objects.count(), 1)
+        person = Person.objects.all()[0]
+        post_data = { 'name': 'Jack Doe', }
+        response = self.client.post(
+            reverse('admin:admin_custom_urls_person_change', args=[person.pk]), post_data)
+        self.assertRedirects(
+            response, reverse('admin:admin_custom_urls_person_delete', args=[person.pk]))
+
+    def test_post_url_continue(self):
+        """
+        Ensures that the ModelAdmin.response_add()'s parameter `post_url_continue`
+        controls the redirection after an object has been created.
+        """
+        post_data = { 'name': 'SuperFast', '_continue': '1' }
+        self.assertEqual(Car.objects.count(), 0)
+        response = self.client.post(
+            reverse('admin:admin_custom_urls_car_add'), post_data)
+        cars = Car.objects.all()
+        self.assertEqual(len(cars), 1)
+        self.assertRedirects(
+            response, reverse('admin:admin_custom_urls_car_history', args=[cars[0].pk]))

@@ -75,18 +75,17 @@ class Collector(object):
         self.using = using
         # Initially, {model: set([instances])}, later values become lists.
         self.data = {}
-        self.batches = {} # {model: {field: set([instances])}}
-        self.field_updates = {} # {model: {(field, value): set([instances])}}
+        self.field_updates = {}  # {model: {(field, value): set([instances])}}
         # fast_deletes is a list of queryset-likes that can be deleted without
         # fetching the objects into memory.
-        self.fast_deletes = [] 
+        self.fast_deletes = []
 
         # Tracks deletion-order dependency for databases without transactions
         # or ability to defer constraint checks. Only concrete model classes
         # should be included, as the dependencies exist only between actual
         # database tables; proxy models are represented here by their concrete
         # parent.
-        self.dependencies = {} # {model: set([models])}
+        self.dependencies = {}  # {model: set([models])}
 
     def add(self, objs, source=None, nullable=False, reverse_dependency=False):
         """
@@ -114,13 +113,6 @@ class Collector(object):
             self.dependencies.setdefault(
                 source._meta.concrete_model, set()).add(model._meta.concrete_model)
         return new_objs
-
-    def add_batch(self, model, field, objs):
-        """
-        Schedules a batch delete. Every instance of 'model' that is related to
-        an instance of 'obj' through 'field' will be deleted.
-        """
-        self.batches.setdefault(model, {}).setdefault(field, set()).update(objs)
 
     def add_field_update(self, field, value, objs):
         """
@@ -303,24 +295,17 @@ class Collector(object):
         for instances in six.itervalues(self.data):
             instances.reverse()
 
-        # delete batches
-        for model, batches in six.iteritems(self.batches):
-            query = sql.DeleteQuery(model)
-            for field, instances in six.iteritems(batches):
-                query.delete_batch([obj.pk for obj in instances], self.using, field)
-
         # delete instances
         for model, instances in six.iteritems(self.data):
             query = sql.DeleteQuery(model)
             pk_list = [obj.pk for obj in instances]
             query.delete_batch(pk_list, self.using)
 
-        # send post_delete signals
-        for model, obj in self.instances_with_model():
             if not model._meta.auto_created:
-                signals.post_delete.send(
-                    sender=model, instance=obj, using=self.using
-                )
+                for obj in instances:
+                    signals.post_delete.send(
+                        sender=model, instance=obj, using=self.using
+                    )
 
         # update collected instances
         for model, instances_for_fieldvalues in six.iteritems(self.field_updates):

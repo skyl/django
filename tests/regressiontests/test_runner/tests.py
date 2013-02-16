@@ -1,8 +1,9 @@
 """
 Tests for django test runner
 """
-from __future__ import absolute_import
+from __future__ import absolute_import, unicode_literals
 
+import sys
 from optparse import make_option
 
 from django.core.exceptions import ImproperlyConfigured
@@ -149,6 +150,11 @@ class ManageCommandTests(unittest.TestCase):
         self.assertTrue(MockTestRunner.invoked,
                         "The custom test runner has not been invoked")
 
+    def test_bad_test_runner(self):
+        with self.assertRaises(AttributeError):
+            call_command('test', 'sites',
+                testrunner='regressiontests.test_runner.NonExistentRunner')
+
 
 class CustomOptionsTestRunner(simple.DjangoTestSuiteRunner):
     option_list = (
@@ -259,6 +265,47 @@ class Sqlite3InMemoryTestDbs(unittest.TestCase):
                 self.assertTrue(connections_support_transactions(), msg)
             finally:
                 db.connections = old_db_connections
+
+
+class DummyBackendTest(unittest.TestCase):
+    def test_setup_databases(self):
+        """
+        Test that setup_databases() doesn't fail with dummy database backend.
+        """
+        runner = DjangoTestSuiteRunner(verbosity=0)
+        old_db_connections = db.connections
+        try:
+            db.connections = db.ConnectionHandler({})
+            old_config = runner.setup_databases()
+            runner.teardown_databases(old_config)
+        except Exception as e:
+            self.fail("setup_databases/teardown_databases unexpectedly raised "
+                      "an error: %s" % e)
+        finally:
+            db.connections = old_db_connections
+
+
+class DeprecationDisplayTest(AdminScriptTestCase):
+    # tests for 19546
+    def setUp(self):
+        settings = {'INSTALLED_APPS': '("regressiontests.test_runner.deprecation_app",)',
+                    'DATABASES': '{"default": {"ENGINE":"django.db.backends.sqlite3", "NAME":":memory:"}}' }
+        self.write_settings('settings.py', sdict=settings)
+
+    def tearDown(self):
+        self.remove_settings('settings.py')
+
+    def test_runner_deprecation_verbosity_default(self):
+        args = ['test', '--settings=regressiontests.settings']
+        out, err = self.run_django_admin(args)
+        self.assertTrue("DeprecationWarning: warning from test" in err)
+
+    @unittest.skipIf(sys.version_info[:2] == (2, 6),
+        "On Python 2.6, DeprecationWarnings are visible anyway")
+    def test_runner_deprecation_verbosity_zero(self):
+        args = ['test', '--settings=regressiontests.settings', '--verbosity=0']
+        out, err = self.run_django_admin(args)
+        self.assertFalse("DeprecationWarning: warning from test" in err)
 
 
 class AutoIncrementResetTest(TransactionTestCase):

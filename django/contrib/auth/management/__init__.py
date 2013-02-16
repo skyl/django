@@ -17,7 +17,7 @@ from django.utils.six.moves import input
 
 
 def _get_permission_codename(action, opts):
-    return '%s_%s' % (action, opts.object_name.lower())
+    return '%s_%s' % (action, opts.model_name)
 
 
 def _get_all_permissions(opts, ctype):
@@ -174,7 +174,7 @@ def get_default_username(check_db=True):
     # Don't return the default username if it is already taken.
     if check_db and default_username:
         try:
-            auth_app.User.objects.get(username=default_username)
+            auth_app.User._default_manager.get(username=default_username)
         except auth_app.User.DoesNotExist:
             pass
         else:

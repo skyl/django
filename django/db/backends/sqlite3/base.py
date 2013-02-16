@@ -18,6 +18,8 @@ from django.db.backends.signals import connection_created
 from django.db.backends.sqlite3.client import DatabaseClient
 from django.db.backends.sqlite3.creation import DatabaseCreation
 from django.db.backends.sqlite3.introspection import DatabaseIntrospection
+from django.db.models import fields
+from django.db.models.sql import aggregates
 from django.utils.dateparse import parse_date, parse_datetime, parse_time
 from django.utils.functional import cached_property
 from django.utils.safestring import SafeBytes
@@ -33,6 +35,10 @@ except ImportError as exc:
     from django.core.exceptions import ImproperlyConfigured
     raise ImproperlyConfigured("Error loading either pysqlite2 or sqlite3 modules (tried in that order): %s" % exc)
 
+try:
+    import pytz
+except ImportError:
+    pytz = None
 
 DatabaseError = Database.DatabaseError
 IntegrityError = Database.IntegrityError
@@ -115,6 +121,10 @@ class DatabaseFeatures(BaseDatabaseFeatures):
         cursor.execute('DROP TABLE STDDEV_TEST')
         return has_support
 
+    @cached_property
+    def has_zoneinfo_database(self):
+        return pytz is not None
+
 class DatabaseOperations(BaseDatabaseOperations):
     def bulk_batch_size(self, fields, objs):
         """
@@ -127,12 +137,23 @@ class DatabaseOperations(BaseDatabaseOperations):
         limit = 999 if len(fields) > 1 else 500
         return (limit // len(fields)) if len(fields) > 0 else len(objs)
 
+    def check_aggregate_support(self, aggregate):
+        bad_fields = (fields.DateField, fields.DateTimeField, fields.TimeField)
+        bad_aggregates = (aggregates.Sum, aggregates.Avg,
+                          aggregates.Variance, aggregates.StdDev)
+        if (isinstance(aggregate.source, bad_fields) and
+                isinstance(aggregate, bad_aggregates)):
+            raise NotImplementedError(
+                'You cannot use Sum, Avg, StdDev and Variance aggregations '
+                'on date/time fields in sqlite3 '
+                'since date/time is saved as text.')
+
     def date_extract_sql(self, lookup_type, field_name):
         # sqlite doesn't support extract, so we fake it with the user-defined
-        # function django_extract that's registered in connect(). Note that
+        # function django_date_extract that's registered in connect(). Note that
         # single quotes are used because this is a string (and could otherwise
         # cause a collision with a field name).
-        return "django_extract('%s', %s)" % (lookup_type.lower(), field_name)
+        return "django_date_extract('%s', %s)" % (lookup_type.lower(), field_name)
 
     def date_interval_sql(self, sql, connector, timedelta):
         # It would be more straightforward if we could use the sqlite strftime
@@ -141,7 +162,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         # values differently. So instead we register our own function that
         # formats the datetime combined with the delta in a manner suitable
         # for comparisons.
-        return  'django_format_dtdelta(%s, "%s", "%d", "%d", "%d")' % (sql,
+        return 'django_format_dtdelta(%s, "%s", "%d", "%d", "%d")' % (sql,
             connector, timedelta.days, timedelta.seconds, timedelta.microseconds)
 
     def date_trunc_sql(self, lookup_type, field_name):
@@ -150,6 +171,26 @@ class DatabaseOperations(BaseDatabaseOperations):
         # single quotes are used because this is a string (and could otherwise
         # cause a collision with a field name).
         return "django_date_trunc('%s', %s)" % (lookup_type.lower(), field_name)
+
+    def datetime_extract_sql(self, lookup_type, field_name, tzname):
+        # Same comment as in date_extract_sql.
+        if settings.USE_TZ:
+            if pytz is None:
+                from django.core.exceptions import ImproperlyConfigured
+                raise ImproperlyConfigured("This query requires pytz, "
+                                           "but it isn't installed.")
+        return "django_datetime_extract('%s', %s, %%s)" % (
+            lookup_type.lower(), field_name), [tzname]
+
+    def datetime_trunc_sql(self, lookup_type, field_name, tzname):
+        # Same comment as in date_trunc_sql.
+        if settings.USE_TZ:
+            if pytz is None:
+                from django.core.exceptions import ImproperlyConfigured
+                raise ImproperlyConfigured("This query requires pytz, "
+                                           "but it isn't installed.")
+        return "django_datetime_trunc('%s', %s, %%s)" % (
+            lookup_type.lower(), field_name), [tzname]
 
     def drop_foreignkey_sql(self):
         return ""
@@ -200,11 +241,6 @@ class DatabaseOperations(BaseDatabaseOperations):
             raise ValueError("SQLite backend does not support timezone-aware times.")
 
         return six.text_type(value)
-
-    def year_lookup_bounds(self, value):
-        first = '%s-01-01'
-        second = '%s-12-31 23:59:59.999999'
-        return [first % value, second % value]
 
     def convert_values(self, value, field):
         """SQLite returns floats when it should be returning decimals,
@@ -297,9 +333,10 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     def get_new_connection(self, conn_params):
         conn = Database.connect(**conn_params)
-        # Register extract, date_trunc, and regexp functions.
-        conn.create_function("django_extract", 2, _sqlite_extract)
+        conn.create_function("django_date_extract", 2, _sqlite_date_extract)
         conn.create_function("django_date_trunc", 2, _sqlite_date_trunc)
+        conn.create_function("django_datetime_extract", 3, _sqlite_datetime_extract)
+        conn.create_function("django_datetime_trunc", 3, _sqlite_datetime_trunc)
         conn.create_function("regexp", 2, _sqlite_regexp)
         conn.create_function("django_format_dtdelta", 5, _sqlite_format_dtdelta)
         return conn
@@ -389,7 +426,7 @@ class SQLiteCursorWrapper(Database.Cursor):
     def convert_query(self, query):
         return FORMAT_QMARK_REGEX.sub('?', query).replace('%%','%')
 
-def _sqlite_extract(lookup_type, dt):
+def _sqlite_date_extract(lookup_type, dt):
     if dt is None:
         return None
     try:
@@ -407,11 +444,45 @@ def _sqlite_date_trunc(lookup_type, dt):
     except (ValueError, TypeError):
         return None
     if lookup_type == 'year':
+        return "%i-01-01" % dt.year
+    elif lookup_type == 'month':
+        return "%i-%02i-01" % (dt.year, dt.month)
+    elif lookup_type == 'day':
+        return "%i-%02i-%02i" % (dt.year, dt.month, dt.day)
+
+def _sqlite_datetime_extract(lookup_type, dt, tzname):
+    if dt is None:
+        return None
+    try:
+        dt = util.typecast_timestamp(dt)
+    except (ValueError, TypeError):
+        return None
+    if tzname is not None:
+        dt = timezone.localtime(dt, pytz.timezone(tzname))
+    if lookup_type == 'week_day':
+        return (dt.isoweekday() % 7) + 1
+    else:
+        return getattr(dt, lookup_type)
+
+def _sqlite_datetime_trunc(lookup_type, dt, tzname):
+    try:
+        dt = util.typecast_timestamp(dt)
+    except (ValueError, TypeError):
+        return None
+    if tzname is not None:
+        dt = timezone.localtime(dt, pytz.timezone(tzname))
+    if lookup_type == 'year':
         return "%i-01-01 00:00:00" % dt.year
     elif lookup_type == 'month':
         return "%i-%02i-01 00:00:00" % (dt.year, dt.month)
     elif lookup_type == 'day':
         return "%i-%02i-%02i 00:00:00" % (dt.year, dt.month, dt.day)
+    elif lookup_type == 'hour':
+        return "%i-%02i-%02i %02i:00:00" % (dt.year, dt.month, dt.day, dt.hour)
+    elif lookup_type == 'minute':
+        return "%i-%02i-%02i %02i:%02i:00" % (dt.year, dt.month, dt.day, dt.hour, dt.minute)
+    elif lookup_type == 'second':
+        return "%i-%02i-%02i %02i:%02i:%02i" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
 
 def _sqlite_format_dtdelta(dt, conn, days, secs, usecs):
     try:

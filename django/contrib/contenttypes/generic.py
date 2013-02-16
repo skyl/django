@@ -11,6 +11,7 @@ from django.db import connection
 from django.db.models import signals
 from django.db import models, router, DEFAULT_DB_ALIAS
 from django.db.models.fields.related import RelatedField, Field, ManyToManyRel
+from django.db.models.related import PathInfo
 from django.forms import ModelForm
 from django.forms.models import BaseModelFormSet, modelformset_factory, save_instance
 from django.contrib.admin.options import InlineModelAdmin, flatten_fieldsets
@@ -42,7 +43,7 @@ class GenericForeignKey(object):
 
     def instance_pre_init(self, signal, sender, args, kwargs, **_kwargs):
         """
-        Handles initializing an object with the generic FK instaed of
+        Handles initializing an object with the generic FK instead of
         content-type/object-id fields.
         """
         if self.name in kwargs:
@@ -51,7 +52,7 @@ class GenericForeignKey(object):
             kwargs[self.fk_field] = value._get_pk_val()
 
     def get_content_type(self, obj=None, id=None, using=None):
-        if obj:
+        if obj is not None:
             return ContentType.objects.db_manager(obj._state.db).get_for_model(obj)
         elif id:
             return ContentType.objects.db_manager(using).get_for_id(id)
@@ -159,6 +160,16 @@ class GenericRelation(RelatedField, Field):
         kwargs['editable'] = False
         kwargs['serialize'] = False
         Field.__init__(self, **kwargs)
+
+    def get_path_info(self):
+        from_field = self.model._meta.pk
+        opts = self.rel.to._meta
+        target = opts.get_field_by_name(self.object_id_field_name)[0]
+        # Note that we are using different field for the join_field
+        # than from_field or to_field. This is a hack, but we need the
+        # GenericRelation to generate the extra SQL.
+        return ([PathInfo(from_field, target, self.model._meta, opts, self, True, False)],
+                opts, target, self)
 
     def get_choices_default(self):
         return Field.get_choices(self, include_blank=False)
@@ -378,7 +389,7 @@ class BaseGenericInlineFormSet(BaseModelFormSet):
         opts = self.model._meta
         self.instance = instance
         self.rel_name = '-'.join((
-            opts.app_label, opts.object_name.lower(),
+            opts.app_label, opts.model_name,
             self.ct_field.name, self.ct_fk_field.name,
         ))
         if self.instance is None or self.instance.pk is None:
@@ -398,7 +409,7 @@ class BaseGenericInlineFormSet(BaseModelFormSet):
     @classmethod
     def get_default_prefix(cls):
         opts = cls.model._meta
-        return '-'.join((opts.app_label, opts.object_name.lower(),
+        return '-'.join((opts.app_label, opts.model_name,
                         cls.ct_field.name, cls.ct_fk_field.name,
         ))
 
@@ -418,7 +429,7 @@ def generic_inlineformset_factory(model, form=ModelForm,
                                   max_num=None,
                                   formfield_callback=None):
     """
-    Returns an ``GenericInlineFormSet`` for the given kwargs.
+    Returns a ``GenericInlineFormSet`` for the given kwargs.
 
     You must provide ``ct_field`` and ``object_id`` if they different from the
     defaults ``content_type`` and ``object_id`` respectively.

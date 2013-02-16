@@ -428,6 +428,23 @@ class FormsExtraTestCase(TestCase, AssertFormErrorsMixin):
         # If insufficient data is provided, None is substituted
         self.assertFormErrors(['This field is required.'], f.clean, ['some text',['JP']])
 
+        # test with no initial data
+        self.assertTrue(f._has_changed(None, ['some text', ['J','P'], ['2007-04-25','6:24:00']]))
+
+        # test when the data is the same as initial
+        self.assertFalse(f._has_changed('some text,JP,2007-04-25 06:24:00',
+            ['some text', ['J','P'], ['2007-04-25','6:24:00']]))
+
+        # test when the first widget's data has changed
+        self.assertTrue(f._has_changed('some text,JP,2007-04-25 06:24:00',
+            ['other text', ['J','P'], ['2007-04-25','6:24:00']]))
+
+        # test when the last widget's data has changed. this ensures that it is not
+        # short circuiting while testing the widgets.
+        self.assertTrue(f._has_changed('some text,JP,2007-04-25 06:24:00',
+            ['some text', ['J','P'], ['2009-04-25','11:44:00']]))
+
+
         class ComplexFieldForm(Form):
             field1 = ComplexField(widget=w)
 
@@ -614,7 +631,7 @@ class FormsExtraTestCase(TestCase, AssertFormErrorsMixin):
         f = CommentForm(data, auto_id=False, error_class=DivErrorList)
         self.assertHTMLEqual(f.as_p(), """<p>Name: <input type="text" name="name" maxlength="50" /></p>
 <div class="errorlist"><div class="error">Enter a valid email address.</div></div>
-<p>Email: <input type="text" name="email" value="invalid" /></p>
+<p>Email: <input type="email" name="email" value="invalid" /></p>
 <div class="errorlist"><div class="error">This field is required.</div></div>
 <p>Comment: <input type="text" name="comment" /></p>""")
 
@@ -725,8 +742,8 @@ class FormsExtraL10NTestCase(TestCase):
 
     def test_l10n_date_changed(self):
         """
-        Ensure that SelectDateWidget._has_changed() works correctly with a
-        localized date format.
+        Ensure that DateField._has_changed() with SelectDateWidget works
+        correctly with a localized date format.
         Refs #17165.
         """
         # With Field.show_hidden_initial=False -----------------------

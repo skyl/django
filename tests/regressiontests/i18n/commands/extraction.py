@@ -4,17 +4,20 @@ from __future__ import unicode_literals
 import os
 import re
 import shutil
+import warnings
 
 from django.core import management
-from django.test import TestCase
+from django.test import SimpleTestCase
 from django.utils.encoding import force_text
 from django.utils._os import upath
+from django.utils import six
 from django.utils.six import StringIO
+from django.utils.translation import TranslatorCommentWarning
 
 
 LOCALE='de'
 
-class ExtractorTests(TestCase):
+class ExtractorTests(SimpleTestCase):
 
     PO_FILE='locale/%s/LC_MESSAGES/django.po' % LOCALE
 
@@ -107,20 +110,24 @@ class BasicExtractorTests(ExtractorTests):
             self.assertMsgId('I think that 100%% is more that 50%% of %(obj)s.', po_contents)
             self.assertMsgId("Blocktrans extraction shouldn't double escape this: %%, a=%(a)s", po_contents)
 
+    def test_force_en_us_locale(self):
+        """Value of locale-munging option used by the command is the right one"""
+        from django.core.management.commands.makemessages import Command
+        self.assertTrue(Command.leave_locale_alone)
+
     def test_extraction_error(self):
         os.chdir(self.test_dir)
-        shutil.copyfile('./templates/template_with_error.tpl', './templates/template_with_error.html')
-        self.assertRaises(SyntaxError, management.call_command, 'makemessages', locale=LOCALE, verbosity=0)
+        self.assertRaises(SyntaxError, management.call_command, 'makemessages', locale=LOCALE, extensions=['tpl'], verbosity=0)
         with self.assertRaises(SyntaxError) as context_manager:
-            management.call_command('makemessages', locale=LOCALE, verbosity=0)
-        self.assertRegexpMatches(str(context_manager.exception),
-                r'Translation blocks must not include other block tags: blocktrans \(file templates[/\\]template_with_error\.html, line 3\)'
+            management.call_command('makemessages', locale=LOCALE, extensions=['tpl'], verbosity=0)
+        six.assertRegex(self, str(context_manager.exception),
+                r'Translation blocks must not include other block tags: blocktrans \(file templates[/\\]template_with_error\.tpl, line 3\)'
             )
-        os.remove('./templates/template_with_error.html')
         # Check that the temporary file was cleaned up
-        self.assertFalse(os.path.exists('./templates/template_with_error.html.py'))
+        self.assertFalse(os.path.exists('./templates/template_with_error.tpl.py'))
 
     def test_extraction_warning(self):
+        """test xgettext warning about multiple bare interpolation placeholders"""
         os.chdir(self.test_dir)
         shutil.copyfile('./code.sample', './code_sample.py')
         stdout = StringIO()
@@ -141,23 +148,23 @@ class BasicExtractorTests(ExtractorTests):
             po_contents = force_text(fp.read())
             # {% trans %}
             self.assertTrue('msgctxt "Special trans context #1"' in po_contents)
-            self.assertTrue("Translatable literal #7a" in po_contents)
+            self.assertMsgId("Translatable literal #7a", po_contents)
             self.assertTrue('msgctxt "Special trans context #2"' in po_contents)
-            self.assertTrue("Translatable literal #7b" in po_contents)
+            self.assertMsgId("Translatable literal #7b", po_contents)
             self.assertTrue('msgctxt "Special trans context #3"' in po_contents)
-            self.assertTrue("Translatable literal #7c" in po_contents)
+            self.assertMsgId("Translatable literal #7c", po_contents)
 
             # {% blocktrans %}
             self.assertTrue('msgctxt "Special blocktrans context #1"' in po_contents)
-            self.assertTrue("Translatable literal #8a" in po_contents)
+            self.assertMsgId("Translatable literal #8a", po_contents)
             self.assertTrue('msgctxt "Special blocktrans context #2"' in po_contents)
-            self.assertTrue("Translatable literal #8b-singular" in po_contents)
+            self.assertMsgId("Translatable literal #8b-singular", po_contents)
             self.assertTrue("Translatable literal #8b-plural" in po_contents)
             self.assertTrue('msgctxt "Special blocktrans context #3"' in po_contents)
-            self.assertTrue("Translatable literal #8c-singular" in po_contents)
+            self.assertMsgId("Translatable literal #8c-singular", po_contents)
             self.assertTrue("Translatable literal #8c-plural" in po_contents)
             self.assertTrue('msgctxt "Special blocktrans context #4"' in po_contents)
-            self.assertTrue("Translatable literal #8d" in po_contents)
+            self.assertMsgId("Translatable literal #8d %(a)s", po_contents)
 
     def test_context_in_single_quotes(self):
         os.chdir(self.test_dir)
@@ -172,6 +179,63 @@ class BasicExtractorTests(ExtractorTests):
             # {% blocktrans %}
             self.assertTrue('msgctxt "Special blocktrans context wrapped in double quotes"' in po_contents)
             self.assertTrue('msgctxt "Special blocktrans context wrapped in single quotes"' in po_contents)
+
+    def test_template_comments(self):
+        """Template comment tags on the same line of other constructs (#19552)"""
+        os.chdir(self.test_dir)
+        # Test detection/end user reporting of old, incorrect templates
+        # translator comments syntax
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter('always')
+            management.call_command('makemessages', locale=LOCALE, extensions=['thtml'], verbosity=0)
+            self.assertEqual(len(ws), 3)
+            for w in ws:
+                self.assertTrue(issubclass(w.category, TranslatorCommentWarning))
+            six.assertRegex(self, str(ws[0].message),
+                r"The translator-targeted comment 'Translators: ignored i18n comment #1' \(file templates/comments.thtml, line 4\) was ignored, because it wasn't the last item on the line\."
+            )
+            six.assertRegex(self, str(ws[1].message),
+                r"The translator-targeted comment 'Translators: ignored i18n comment #3' \(file templates/comments.thtml, line 6\) was ignored, because it wasn't the last item on the line\."
+            )
+            six.assertRegex(self, str(ws[2].message),
+                r"The translator-targeted comment 'Translators: ignored i18n comment #4' \(file templates/comments.thtml, line 8\) was ignored, because it wasn't the last item on the line\."
+            )
+        # Now test .po file contents
+        self.assertTrue(os.path.exists(self.PO_FILE))
+        with open(self.PO_FILE, 'r') as fp:
+            po_contents = force_text(fp.read())
+
+            self.assertMsgId('Translatable literal #9a', po_contents)
+            self.assertFalse('ignored comment #1' in po_contents)
+
+            self.assertFalse('Translators: ignored i18n comment #1' in po_contents)
+            self.assertMsgId("Translatable literal #9b", po_contents)
+
+            self.assertFalse('ignored i18n comment #2' in po_contents)
+            self.assertFalse('ignored comment #2' in po_contents)
+            self.assertMsgId('Translatable literal #9c', po_contents)
+
+            self.assertFalse('ignored comment #3' in po_contents)
+            self.assertFalse('ignored i18n comment #3' in po_contents)
+            self.assertMsgId('Translatable literal #9d', po_contents)
+
+            self.assertFalse('ignored comment #4' in po_contents)
+            self.assertMsgId('Translatable literal #9e', po_contents)
+            self.assertFalse('ignored comment #5' in po_contents)
+
+            self.assertFalse('ignored i18n comment #4' in po_contents)
+            self.assertMsgId('Translatable literal #9f', po_contents)
+            self.assertTrue('#. Translators: valid i18n comment #5' in po_contents)
+
+            self.assertMsgId('Translatable literal #9g', po_contents)
+            self.assertTrue('#. Translators: valid i18n comment #6' in po_contents)
+            self.assertMsgId('Translatable literal #9h', po_contents)
+            self.assertTrue('#. Translators: valid i18n comment #7' in po_contents)
+            self.assertMsgId('Translatable literal #9i', po_contents)
+
+            six.assertRegex(self, po_contents, r'#\..+Translators: valid i18n comment #8')
+            six.assertRegex(self, po_contents, r'#\..+Translators: valid i18n comment #9')
+            self.assertMsgId("Translatable literal #9j", po_contents)
 
 
 class JavascriptExtractorTests(ExtractorTests):
@@ -293,3 +357,64 @@ class NoLocationExtractorTests(ExtractorTests):
         with open(self.PO_FILE, 'r') as fp:
             po_contents = force_text(fp.read())
             self.assertTrue('#: templates/test.html:55' in po_contents)
+
+
+class KeepPotFileExtractorTests(ExtractorTests):
+
+    POT_FILE='locale/django.pot'
+
+    def setUp(self):
+        super(KeepPotFileExtractorTests, self).setUp()
+
+    def tearDown(self):
+        super(KeepPotFileExtractorTests, self).tearDown()
+        os.chdir(self.test_dir)
+        try:
+            os.unlink(self.POT_FILE)
+        except OSError:
+            pass
+        os.chdir(self._cwd)
+
+    def test_keep_pot_disabled_by_default(self):
+        os.chdir(self.test_dir)
+        management.call_command('makemessages', locale=LOCALE, verbosity=0)
+        self.assertFalse(os.path.exists(self.POT_FILE))
+
+    def test_keep_pot_explicitly_disabled(self):
+        os.chdir(self.test_dir)
+        management.call_command('makemessages', locale=LOCALE, verbosity=0,
+                                keep_pot=False)
+        self.assertFalse(os.path.exists(self.POT_FILE))
+
+    def test_keep_pot_enabled(self):
+        os.chdir(self.test_dir)
+        management.call_command('makemessages', locale=LOCALE, verbosity=0,
+                                keep_pot=True)
+        self.assertTrue(os.path.exists(self.POT_FILE))
+
+
+class MultipleLocaleExtractionTests(ExtractorTests):
+    PO_FILE_PT = 'locale/pt/LC_MESSAGES/django.po'
+    PO_FILE_DE = 'locale/de/LC_MESSAGES/django.po'
+    LOCALES = ['pt', 'de', 'ch']
+
+    def tearDown(self):
+        os.chdir(self.test_dir)
+        for locale in self.LOCALES:
+            try:
+                self._rmrf('locale/%s' % locale)
+            except OSError:
+                pass
+        os.chdir(self._cwd)
+
+    def test_multiple_locales(self):
+        os.chdir(self.test_dir)
+        management.call_command('makemessages', locale=['pt','de'], verbosity=0)
+        self.assertTrue(os.path.exists(self.PO_FILE_PT))
+        self.assertTrue(os.path.exists(self.PO_FILE_DE))
+
+    def test_comma_separated_locales(self):
+        os.chdir(self.test_dir)
+        management.call_command('makemessages', locale='pt,de,ch', verbosity=0)
+        self.assertTrue(os.path.exists(self.PO_FILE_PT))
+        self.assertTrue(os.path.exists(self.PO_FILE_DE))

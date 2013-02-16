@@ -96,9 +96,10 @@ Download the Django source code repository using the following command::
 
         pip install -e /path/to/your/local/clone/django/
 
-    to link your cloned checkout into a virtual environment. This is a great
-    option to isolate your development copy of Django from the rest of your
-    system and avoids potential package conflicts.
+    (where ``django`` is the directory of your clone that contains
+    ``setup.py``) to link your cloned checkout into a virtual environment. This
+    is a great option to isolate your development copy of Django from the rest
+    of your system and avoids potential package conflicts.
 
 __ http://www.virtualenv.org
 
@@ -281,7 +282,7 @@ correctly in a couple different situations.
     computer programming, so there's lots of information out there:
 
     * A good first look at writing tests for Django can be found in the
-      documentation on :doc:`Testing Django applications</topics/testing/>`.
+      documentation on :doc:`Testing Django applications </topics/testing/overview>`.
     * Dive Into Python (a free online book for beginning Python developers)
       includes a great `introduction to Unit Testing`__.
     * After reading those, if you want something a little meatier to sink

@@ -8,10 +8,11 @@ from django.conf import settings
 from django.test.signals import setting_changed
 from django.utils import importlib
 from django.utils.datastructures import SortedDict
-from django.utils.encoding import force_bytes
+from django.utils.encoding import force_bytes, force_str
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.crypto import (
     pbkdf2, constant_time_compare, get_random_string)
+from django.utils.module_loading import import_by_path
 from django.utils.translation import ugettext_noop as _
 
 
@@ -84,13 +85,7 @@ def load_hashers(password_hashers=None):
     if not password_hashers:
         password_hashers = settings.PASSWORD_HASHERS
     for backend in password_hashers:
-        try:
-            mod_path, cls_name = backend.rsplit('.', 1)
-            mod = importlib.import_module(mod_path)
-            hasher_cls = getattr(mod, cls_name)
-        except (AttributeError, ImportError, ValueError):
-            raise ImproperlyConfigured("hasher not found: %s" % backend)
-        hasher = hasher_cls()
+        hasher = import_by_path(backend)()
         if not getattr(hasher, 'algorithm'):
             raise ImproperlyConfigured("hasher doesn't specify an "
                                        "algorithm name: %s" % backend)
@@ -132,7 +127,8 @@ def identify_hasher(encoded):
     get_hasher() to return hasher. Raises ValueError if
     algorithm cannot be identified, or if hasher is not loaded.
     """
-    if len(encoded) == 32 and '$' not in encoded:
+    if ((len(encoded) == 32 and '$' not in encoded) or
+            (len(encoded) == 37 and encoded.startswith('md5$$'))):
         algorithm = 'unsalted_md5'
     else:
         algorithm = encoded.split('$', 1)[0]
@@ -275,14 +271,16 @@ class BCryptPasswordHasher(BasePasswordHasher):
 
     def encode(self, password, salt):
         bcrypt = self._load_library()
-        data = bcrypt.hashpw(password, salt)
+        # Need to reevaluate the force_bytes call once bcrypt is supported on
+        # Python 3
+        data = bcrypt.hashpw(force_bytes(password), salt)
         return "%s$%s" % (self.algorithm, data)
 
     def verify(self, password, encoded):
         algorithm, data = encoded.split('$', 1)
         assert algorithm == self.algorithm
         bcrypt = self._load_library()
-        return constant_time_compare(data, bcrypt.hashpw(password, data))
+        return constant_time_compare(data, bcrypt.hashpw(force_bytes(password), data))
 
     def safe_summary(self, encoded):
         algorithm, empty, algostr, work_factor, data = encoded.split('$', 4)
@@ -370,6 +368,8 @@ class UnsaltedMD5PasswordHasher(BasePasswordHasher):
         return hashlib.md5(force_bytes(password)).hexdigest()
 
     def verify(self, password, encoded):
+        if len(encoded) == 37 and encoded.startswith('md5$$'):
+            encoded = encoded[5:]
         encoded_2 = self.encode(password, '')
         return constant_time_compare(encoded, encoded_2)
 
@@ -395,7 +395,7 @@ class CryptPasswordHasher(BasePasswordHasher):
     def encode(self, password, salt):
         crypt = self._load_library()
         assert len(salt) == 2
-        data = crypt.crypt(password, salt)
+        data = crypt.crypt(force_str(password), salt)
         # we don't need to store the salt, but Django used to do this
         return "%s$%s$%s" % (self.algorithm, '', data)
 
@@ -403,7 +403,7 @@ class CryptPasswordHasher(BasePasswordHasher):
         crypt = self._load_library()
         algorithm, salt, data = encoded.split('$', 2)
         assert algorithm == self.algorithm
-        return constant_time_compare(data, crypt.crypt(password, data))
+        return constant_time_compare(data, crypt.crypt(force_str(password), data))
 
     def safe_summary(self, encoded):
         algorithm, salt, data = encoded.split('$', 2)

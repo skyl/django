@@ -158,7 +158,7 @@ class ChangeList(object):
                     del p[k]
             else:
                 p[k] = v
-        return '?%s' % urlencode(p)
+        return '?%s' % urlencode(sorted(p.items()))
 
     def get_results(self, request):
         paginator = self.model_admin.get_paginator(request, self.query_set, self.list_per_page)
@@ -379,6 +379,6 @@ class ChangeList(object):
     def url_for_result(self, result):
         pk = getattr(result, self.pk_attname)
         return reverse('admin:%s_%s_change' % (self.opts.app_label,
-                                               self.opts.module_name),
+                                               self.opts.model_name),
                        args=(quote(pk),),
                        current_app=self.model_admin.admin_site.name)

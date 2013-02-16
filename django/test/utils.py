@@ -4,12 +4,13 @@ from xml.dom.minidom import parseString, Node
 
 from django.conf import settings, UserSettingsHolder
 from django.core import mail
-from django.test.signals import template_rendered, setting_changed
 from django.template import Template, loader, TemplateDoesNotExist
 from django.template.loaders import cached
-from django.utils.translation import deactivate
+from django.test.signals import template_rendered, setting_changed
+from django.utils.encoding import force_str
 from django.utils.functional import wraps
 from django.utils import six
+from django.utils.translation import deactivate
 
 
 __all__ = (
@@ -98,6 +99,11 @@ def teardown_test_environment():
     del mail.outbox
 
 
+warn_txt = ("get_warnings_state/restore_warnings_state functions from "
+    "django.test.utils are deprecated. Use Python's warnings.catch_warnings() "
+    "context manager instead.")
+
+
 def get_warnings_state():
     """
     Returns an object containing the state of the warnings module
@@ -105,6 +111,7 @@ def get_warnings_state():
     # There is no public interface for doing this, but this implementation of
     # get_warnings_state and restore_warnings_state appears to work on Python
     # 2.4 to 2.7.
+    warnings.warn(warn_txt, DeprecationWarning, stacklevel=2)
     return warnings.filters[:]
 
 
@@ -113,6 +120,7 @@ def restore_warnings_state(state):
     Restores the state of the warnings module when passed an object that was
     returned by get_warnings_state()
     """
+    warnings.warn(warn_txt, DeprecationWarning, stacklevel=2)
     warnings.filters = state[:]
 
 
@@ -126,7 +134,7 @@ def get_runner(settings, test_runner_class=None):
         test_module_name = '.'.join(test_path[:-1])
     else:
         test_module_name = '.'
-    test_module = __import__(test_module_name, {}, {}, test_path[-1])
+    test_module = __import__(test_module_name, {}, {}, force_str(test_path[-1]))
     test_runner = getattr(test_module, test_path[-1])
     return test_runner
 

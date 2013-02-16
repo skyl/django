@@ -1,3 +1,5 @@
+import warnings
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import (Group, User, SiteProfileNotAvailable,
@@ -17,21 +19,27 @@ class ProfileTestCase(TestCase):
 
         # calling get_profile without AUTH_PROFILE_MODULE set
         del settings.AUTH_PROFILE_MODULE
-        with six.assertRaisesRegex(self, SiteProfileNotAvailable,
-                "You need to set AUTH_PROFILE_MODULE in your project"):
-            user.get_profile()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with six.assertRaisesRegex(self, SiteProfileNotAvailable,
+                    "You need to set AUTH_PROFILE_MODULE in your project"):
+                user.get_profile()
 
         # Bad syntax in AUTH_PROFILE_MODULE:
         settings.AUTH_PROFILE_MODULE = 'foobar'
-        with six.assertRaisesRegex(self, SiteProfileNotAvailable,
-                "app_label and model_name should be separated by a dot"):
-            user.get_profile()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with six.assertRaisesRegex(self, SiteProfileNotAvailable,
+                    "app_label and model_name should be separated by a dot"):
+                user.get_profile()
 
         # module that doesn't exist
         settings.AUTH_PROFILE_MODULE = 'foo.bar'
-        with six.assertRaisesRegex(self, SiteProfileNotAvailable,
-                "Unable to load the profile model"):
-            user.get_profile()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with six.assertRaisesRegex(self, SiteProfileNotAvailable,
+                    "Unable to load the profile model"):
+                user.get_profile()
 
 
 @skipIfCustomUser
@@ -129,6 +137,6 @@ class IsActiveTestCase(TestCase):
         user.is_active = False
         # there should be no problem saving - but the attribute is not saved
         user.save()
-        user_fetched = UserModel.objects.get(pk=user.pk)
+        user_fetched = UserModel._default_manager.get(pk=user.pk)
         # the attribute is always true for newly retrieved instance
         self.assertEqual(user_fetched.is_active, True)

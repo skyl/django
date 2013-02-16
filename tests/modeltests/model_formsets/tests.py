@@ -42,21 +42,29 @@ class DeletionTests(TestCase):
         doesn't cause validation errors.
         """
         PoetFormSet = modelformset_factory(Poet, can_delete=True)
+        poet = Poet.objects.create(name='test')
+        # One existing untouched and two new unvalid forms
         data = {
-            'form-TOTAL_FORMS': '1',
-            'form-INITIAL_FORMS': '0',
+            'form-TOTAL_FORMS': '3',
+            'form-INITIAL_FORMS': '1',
             'form-MAX_NUM_FORMS': '0',
-            'form-0-id': '',
-            'form-0-name': 'x' * 1000,
+            'form-0-id': six.text_type(poet.id),
+            'form-0-name': 'test',
+            'form-1-id': '',
+            'form-1-name': 'x' * 1000, # Too long
+            'form-1-id': six.text_type(poet.id), # Violate unique constraint
+            'form-1-name': 'test2',
         }
         formset = PoetFormSet(data, queryset=Poet.objects.all())
         # Make sure this form doesn't pass validation.
         self.assertEqual(formset.is_valid(), False)
-        self.assertEqual(Poet.objects.count(), 0)
+        self.assertEqual(Poet.objects.count(), 1)
 
         # Then make sure that it *does* pass validation and delete the object,
-        # even though the data isn't actually valid.
+        # even though the data in new forms aren't actually valid.
         data['form-0-DELETE'] = 'on'
+        data['form-1-DELETE'] = 'on'
+        data['form-2-DELETE'] = 'on'
         formset = PoetFormSet(data, queryset=Poet.objects.all())
         self.assertEqual(formset.is_valid(), True)
         formset.save()
@@ -64,7 +72,7 @@ class DeletionTests(TestCase):
 
     def test_change_form_deletion_when_invalid(self):
         """
-        Make sure that an add form that is filled out, but marked for deletion
+        Make sure that a change form that is filled out, but marked for deletion
         doesn't cause validation errors.
         """
         PoetFormSet = modelformset_factory(Poet, can_delete=True)
@@ -1190,3 +1198,27 @@ class ModelFormsetTest(TestCase):
         self.assertFalse(formset.is_valid())
         self.assertEqual(formset._non_form_errors,
             ['Please correct the duplicate data for subtitle which must be unique for the month in posted.'])
+
+
+class TestModelFormsetWidgets(TestCase):
+    def test_modelformset_factory_widgets(self):
+        widgets = {
+            'name': forms.TextInput(attrs={'class': 'poet'})
+        }
+        PoetFormSet = modelformset_factory(Poet, widgets=widgets)
+        form = PoetFormSet.form()
+        self.assertHTMLEqual(
+            "%s" % form['name'],
+            '<input id="id_name" maxlength="100" type="text" class="poet" name="name" />'
+        )
+
+    def test_inlineformset_factory_widgets(self):
+        widgets = {
+            'title': forms.TextInput(attrs={'class': 'book'})
+        }
+        BookFormSet = inlineformset_factory(Author, Book, widgets=widgets)
+        form = BookFormSet.form()
+        self.assertHTMLEqual(
+            "%s" % form['title'],
+            '<input class="book" id="id_title" maxlength="100" name="title" type="text" />'
+        )

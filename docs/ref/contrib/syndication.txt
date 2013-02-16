@@ -77,7 +77,7 @@ latest five news items::
 To connect a URL to this feed, put an instance of the Feed object in
 your :doc:`URLconf </topics/http/urls>`. For example::
 
-    from django.conf.urls import patterns, url, include
+    from django.conf.urls import patterns
     from myproject.feeds import LatestEntriesFeed
 
     urlpatterns = patterns('',
@@ -321,7 +321,7 @@ Here's a full example::
 
 And the accompanying URLconf::
 
-    from django.conf.urls import patterns, url, include
+    from django.conf.urls import patterns
     from myproject.feeds import RssSiteNewsFeed, AtomSiteNewsFeed
 
     urlpatterns = patterns('',
@@ -334,7 +334,7 @@ And the accompanying URLconf::
 Feed class reference
 --------------------
 
-.. class:: django.contrib.syndication.views.Feed
+.. class:: views.Feed
 
 This example illustrates all possible attributes and methods for a
 :class:`~django.contrib.syndication.views.Feed` class::
@@ -623,6 +623,18 @@ This example illustrates all possible attributes and methods for a
             """
             Takes an item, as return by items(), and returns the item's ID.
             """
+
+        # ITEM_GUID_IS_PERMALINK -- The following method is optional. If
+        # provided, it sets the 'isPermaLink' attribute of an item's
+        # GUID element. This method is used only when 'item_guid' is
+        # specified.
+
+        def item_guid_is_permalink(self, obj):
+            """
+            Takes an item, as returned by items(), and returns a boolean.
+            """
+
+        item_guid_is_permalink = False  # Hard coded value
 
         # ITEM AUTHOR NAME -- One of the following three is optional. The
         # framework looks for them in this order.

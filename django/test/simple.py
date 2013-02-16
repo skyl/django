@@ -1,3 +1,4 @@
+import logging
 import unittest as real_unittest
 
 from django.conf import settings
@@ -10,7 +11,7 @@ from django.utils import unittest
 from django.utils.importlib import import_module
 from django.utils.module_loading import module_has_submodule
 
-__all__ = ('DjangoTestSuiteRunner')
+__all__ = ('DjangoTestSuiteRunner',)
 
 # The module name for tests outside models.py
 TEST_MODULE = 'tests'
@@ -365,7 +366,19 @@ class DjangoTestSuiteRunner(object):
         self.setup_test_environment()
         suite = self.build_suite(test_labels, extra_tests)
         old_config = self.setup_databases()
+        if self.verbosity > 0:
+            # ensure that deprecation warnings are displayed during testing
+            # the following state is assumed:
+            # logging.capturewarnings is true
+            # a "default" level warnings filter has been added for
+            # DeprecationWarning. See django.conf.LazySettings._configure_logging
+            logger = logging.getLogger('py.warnings')
+            handler = logging.StreamHandler()
+            logger.addHandler(handler)
         result = self.run_suite(suite)
+        if self.verbosity > 0:
+            # remove the testing-specific handler
+            logger.removeHandler(handler)
         self.teardown_databases(old_config)
         self.teardown_test_environment()
         return self.suite_result(suite, result)

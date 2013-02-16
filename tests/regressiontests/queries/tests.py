@@ -8,8 +8,8 @@ import sys
 from django.conf import settings
 from django.core.exceptions import FieldError
 from django.db import DatabaseError, connection, connections, DEFAULT_DB_ALIAS
-from django.db.models import Count
-from django.db.models.query import Q, ITER_CHUNK_SIZE, EmptyQuerySet
+from django.db.models import Count, F, Q
+from django.db.models.query import ITER_CHUNK_SIZE
 from django.db.models.sql.where import WhereNode, EverythingNode, NothingNode
 from django.db.models.sql.datastructures import EmptyResultSet
 from django.test import TestCase, skipUnlessDBFeature
@@ -24,7 +24,7 @@ from .models import (Annotation, Article, Author, Celebrity, Child, Cover,
     Node, ObjectA, ObjectB, ObjectC, CategoryItem, SimpleCategory,
     SpecialCategory, OneToOneCategory, NullableName, ProxyCategory,
     SingleObject, RelatedObject, ModelA, ModelD, Responsibility, Job,
-    JobResponsibilities)
+    JobResponsibilities, BaseA)
 
 
 class BaseQuerysetTest(TestCase):
@@ -550,37 +550,37 @@ class Queries1Tests(BaseQuerysetTest):
     def test_tickets_6180_6203(self):
         # Dates with limits and/or counts
         self.assertEqual(Item.objects.count(), 4)
-        self.assertEqual(Item.objects.dates('created', 'month').count(), 1)
-        self.assertEqual(Item.objects.dates('created', 'day').count(), 2)
-        self.assertEqual(len(Item.objects.dates('created', 'day')), 2)
-        self.assertEqual(Item.objects.dates('created', 'day')[0], datetime.datetime(2007, 12, 19, 0, 0))
+        self.assertEqual(Item.objects.datetimes('created', 'month').count(), 1)
+        self.assertEqual(Item.objects.datetimes('created', 'day').count(), 2)
+        self.assertEqual(len(Item.objects.datetimes('created', 'day')), 2)
+        self.assertEqual(Item.objects.datetimes('created', 'day')[0], datetime.datetime(2007, 12, 19, 0, 0))
 
     def test_tickets_7087_12242(self):
         # Dates with extra select columns
         self.assertQuerysetEqual(
-            Item.objects.dates('created', 'day').extra(select={'a': 1}),
+            Item.objects.datetimes('created', 'day').extra(select={'a': 1}),
             ['datetime.datetime(2007, 12, 19, 0, 0)', 'datetime.datetime(2007, 12, 20, 0, 0)']
         )
         self.assertQuerysetEqual(
-            Item.objects.extra(select={'a': 1}).dates('created', 'day'),
+            Item.objects.extra(select={'a': 1}).datetimes('created', 'day'),
             ['datetime.datetime(2007, 12, 19, 0, 0)', 'datetime.datetime(2007, 12, 20, 0, 0)']
         )
 
         name="one"
         self.assertQuerysetEqual(
-            Item.objects.dates('created', 'day').extra(where=['name=%s'], params=[name]),
+            Item.objects.datetimes('created', 'day').extra(where=['name=%s'], params=[name]),
             ['datetime.datetime(2007, 12, 19, 0, 0)']
         )
 
         self.assertQuerysetEqual(
-            Item.objects.extra(where=['name=%s'], params=[name]).dates('created', 'day'),
+            Item.objects.extra(where=['name=%s'], params=[name]).datetimes('created', 'day'),
             ['datetime.datetime(2007, 12, 19, 0, 0)']
         )
 
     def test_ticket7155(self):
         # Nullable dates
         self.assertQuerysetEqual(
-            Item.objects.dates('modified', 'day'),
+            Item.objects.datetimes('modified', 'day'),
             ['datetime.datetime(2007, 12, 19, 0, 0)']
         )
 
@@ -663,31 +663,32 @@ class Queries1Tests(BaseQuerysetTest):
             Item.objects.filter(created__in=[self.time1, self.time2]),
             ['<Item: one>', '<Item: two>']
         )
-
     def test_ticket7235(self):
         # An EmptyQuerySet should not raise exceptions if it is filtered.
-        q = EmptyQuerySet()
-        self.assertQuerysetEqual(q.all(), [])
-        self.assertQuerysetEqual(q.filter(x=10), [])
-        self.assertQuerysetEqual(q.exclude(y=3), [])
-        self.assertQuerysetEqual(q.complex_filter({'pk': 1}), [])
-        self.assertQuerysetEqual(q.select_related('spam', 'eggs'), [])
-        self.assertQuerysetEqual(q.annotate(Count('eggs')), [])
-        self.assertQuerysetEqual(q.order_by('-pub_date', 'headline'), [])
-        self.assertQuerysetEqual(q.distinct(), [])
-        self.assertQuerysetEqual(
-            q.extra(select={'is_recent': "pub_date > '2006-01-01'"}),
-            []
-        )
-        q.query.low_mark = 1
-        self.assertRaisesMessage(
-            AssertionError,
-            'Cannot change a query once a slice has been taken',
-            q.extra, select={'is_recent': "pub_date > '2006-01-01'"}
-        )
-        self.assertQuerysetEqual(q.reverse(), [])
-        self.assertQuerysetEqual(q.defer('spam', 'eggs'), [])
-        self.assertQuerysetEqual(q.only('spam', 'eggs'), [])
+        Eaten.objects.create(meal='m')
+        q = Eaten.objects.none()
+        with self.assertNumQueries(0):
+            self.assertQuerysetEqual(q.all(), [])
+            self.assertQuerysetEqual(q.filter(meal='m'), [])
+            self.assertQuerysetEqual(q.exclude(meal='m'), [])
+            self.assertQuerysetEqual(q.complex_filter({'pk': 1}), [])
+            self.assertQuerysetEqual(q.select_related('food'), [])
+            self.assertQuerysetEqual(q.annotate(Count('food')), [])
+            self.assertQuerysetEqual(q.order_by('meal', 'food'), [])
+            self.assertQuerysetEqual(q.distinct(), [])
+            self.assertQuerysetEqual(
+                q.extra(select={'foo': "1"}),
+                []
+            )
+            q.query.low_mark = 1
+            self.assertRaisesMessage(
+                AssertionError,
+                'Cannot change a query once a slice has been taken',
+                q.extra, select={'foo': "1"}
+            )
+            self.assertQuerysetEqual(q.reverse(), [])
+            self.assertQuerysetEqual(q.defer('meal'), [])
+            self.assertQuerysetEqual(q.only('meal'), [])
 
     def test_ticket7791(self):
         # There were "issues" when ordering and distinct-ing on fields related
@@ -698,7 +699,7 @@ class Queries1Tests(BaseQuerysetTest):
         )
 
         # Pickling of DateQuerySets used to fail
-        qs = Item.objects.dates('created', 'month')
+        qs = Item.objects.datetimes('created', 'month')
         _ = pickle.loads(pickle.dumps(qs))
 
     def test_ticket9997(self):
@@ -1234,8 +1235,8 @@ class Queries3Tests(BaseQuerysetTest):
         # field
         self.assertRaisesMessage(
             AssertionError,
-            "'name' isn't a DateField.",
-            Item.objects.dates, 'name', 'month'
+            "'name' isn't a DateTimeField.",
+            Item.objects.datetimes, 'name', 'month'
         )
 
 class Queries4Tests(BaseQuerysetTest):
@@ -1292,9 +1293,9 @@ class Queries4Tests(BaseQuerysetTest):
         q1 = Author.objects.filter(report__name='r5')
         q2 = Author.objects.filter(report__name='r4').filter(report__name='r1')
         combined = q1|q2
-        self.assertEquals(str(combined.query).count('JOIN'), 2)
-        self.assertEquals(len(combined), 1)
-        self.assertEquals(combined[0].name, 'a1')
+        self.assertEqual(str(combined.query).count('JOIN'), 2)
+        self.assertEqual(len(combined), 1)
+        self.assertEqual(combined[0].name, 'a1')
 
     def test_ticket7095(self):
         # Updates that are filtered on the model being updated are somewhat
@@ -1643,8 +1644,8 @@ class NullableRelOrderingTests(TestCase):
         # and that join must be LEFT join. The already existing join to related
         # objects must be kept INNER. So, we have both a INNER and a LEFT join
         # in the query.
-        self.assertEquals(str(qs.query).count('LEFT'), 1)
-        self.assertEquals(str(qs.query).count('INNER'), 1)
+        self.assertEqual(str(qs.query).count('LEFT'), 1)
+        self.assertEqual(str(qs.query).count('INNER'), 1)
         self.assertQuerysetEqual(
             qs,
             ['<Plaything: p2>']
@@ -1918,6 +1919,7 @@ class SubqueryTests(TestCase):
 
 
 class CloneTests(TestCase):
+
     def test_evaluated_queryset_as_argument(self):
         "#13227 -- If a queryset is already evaluated, it can still be used as a query arg"
         n = Note(note='Test1', misc='misc')
@@ -1932,11 +1934,44 @@ class CloneTests(TestCase):
         # that query in a way that involves cloning.
         self.assertEqual(ExtraInfo.objects.filter(note__in=n_list)[0].info, 'good')
 
+    def test_no_model_options_cloning(self):
+        """
+        Test that cloning a queryset does not get out of hand. While complete
+        testing is impossible, this is a sanity check against invalid use of
+        deepcopy. refs #16759.
+        """
+        opts_class = type(Note._meta)
+        note_deepcopy = getattr(opts_class, "__deepcopy__", None)
+        opts_class.__deepcopy__ = lambda obj, memo: self.fail("Model options shouldn't be cloned.")
+        try:
+            Note.objects.filter(pk__lte=F('pk') + 1).all()
+        finally:
+            if note_deepcopy is None:
+                delattr(opts_class, "__deepcopy__")
+            else:
+                opts_class.__deepcopy__ = note_deepcopy
+
+    def test_no_fields_cloning(self):
+        """
+        Test that cloning a queryset does not get out of hand. While complete
+        testing is impossible, this is a sanity check against invalid use of
+        deepcopy. refs #16759.
+        """
+        opts_class = type(Note._meta.get_field_by_name("misc")[0])
+        note_deepcopy = getattr(opts_class, "__deepcopy__", None)
+        opts_class.__deepcopy__ = lambda obj, memo: self.fail("Model fields shouldn't be cloned")
+        try:
+            Note.objects.filter(note=F('misc')).all()
+        finally:
+            if note_deepcopy is None:
+                delattr(opts_class, "__deepcopy__")
+            else:
+                opts_class.__deepcopy__ = note_deepcopy
 
 class EmptyQuerySetTests(TestCase):
     def test_emptyqueryset_values(self):
-        # #14366 -- Calling .values() on an EmptyQuerySet and then cloning that
-        # should not cause an error"
+        # #14366 -- Calling .values() on an empty QuerySet and then cloning
+        # that should not cause an error
         self.assertQuerysetEqual(
             Number.objects.none().values('num').order_by('num'), []
         )
@@ -1952,9 +1987,9 @@ class EmptyQuerySetTests(TestCase):
         )
 
     def test_ticket_19151(self):
-        # #19151 -- Calling .values() or .values_list() on an EmptyQuerySet
-        # should return EmptyQuerySet and not cause an error.
-        q = EmptyQuerySet()
+        # #19151 -- Calling .values() or .values_list() on an empty QuerySet
+        # should return an empty QuerySet and not cause an error.
+        q = Author.objects.none()
         self.assertQuerysetEqual(q.values(), [])
         self.assertQuerysetEqual(q.values_list(), [])
 
@@ -2134,8 +2169,10 @@ class ConditionalTests(BaseQuerysetTest):
     @skipUnlessDBFeature('supports_1000_query_parameters')
     def test_ticket14244(self):
         # Test that the "in" lookup works with lists of 1000 items or more.
+        # The numbers amount is picked to force three different IN batches
+        # for Oracle, yet to be less than 2100 parameter limit for MSSQL.
+        numbers = range(2050)
         Number.objects.all().delete()
-        numbers = range(2500)
         Number.objects.bulk_create(Number(num=num) for num in numbers)
         self.assertEqual(
             Number.objects.filter(num__in=numbers[:1000]).count(),
@@ -2151,7 +2188,7 @@ class ConditionalTests(BaseQuerysetTest):
         )
         self.assertEqual(
             Number.objects.filter(num__in=numbers).count(),
-            2500
+            len(numbers)
         )
 
 
@@ -2417,4 +2454,161 @@ class ReverseJoinTrimmingTest(TestCase):
         t = Tag.objects.create()
         qs = Tag.objects.filter(annotation__tag=t.pk)
         self.assertIn('INNER JOIN', str(qs.query))
-        self.assertEquals(list(qs), [])
+        self.assertEqual(list(qs), [])
+
+class JoinReuseTest(TestCase):
+    """
+    Test that the queries reuse joins sensibly (for example, direct joins
+    are always reused).
+    """
+    def test_fk_reuse(self):
+        qs = Annotation.objects.filter(tag__name='foo').filter(tag__name='bar')
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_fk_reuse_select_related(self):
+        qs = Annotation.objects.filter(tag__name='foo').select_related('tag')
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_fk_reuse_annotation(self):
+        qs = Annotation.objects.filter(tag__name='foo').annotate(cnt=Count('tag__name'))
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_fk_reuse_disjunction(self):
+        qs = Annotation.objects.filter(Q(tag__name='foo') | Q(tag__name='bar'))
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_fk_reuse_order_by(self):
+        qs = Annotation.objects.filter(tag__name='foo').order_by('tag__name')
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_revo2o_reuse(self):
+        qs = Detail.objects.filter(member__name='foo').filter(member__name='foo')
+        self.assertEqual(str(qs.query).count('JOIN'), 1)
+
+    def test_revfk_noreuse(self):
+        qs = Author.objects.filter(report__name='r4').filter(report__name='r1')
+        self.assertEqual(str(qs.query).count('JOIN'), 2)
+
+class DisjunctionPromotionTests(TestCase):
+    def test_disjunction_promotion1(self):
+        # Pre-existing join, add two ORed filters to the same join,
+        # all joins can be INNER JOINS.
+        qs = BaseA.objects.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        qs = qs.filter(Q(b__f1='foo') | Q(b__f2='foo'))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 2)
+        # Reverse the order of AND and OR filters.
+        qs = BaseA.objects.filter(Q(b__f1='foo') | Q(b__f2='foo'))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        qs = qs.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 2)
+
+    def test_disjunction_promotion2(self):
+        qs = BaseA.objects.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        # Now we have two different joins in an ORed condition, these
+        # must be OUTER joins. The pre-existing join should remain INNER.
+        qs = qs.filter(Q(b__f1='foo') | Q(c__f2='foo'))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 2)
+        # Reverse case.
+        qs = BaseA.objects.filter(Q(b__f1='foo') | Q(c__f2='foo'))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 2)
+        qs = qs.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 2)
+
+    def test_disjunction_promotion3(self):
+        qs = BaseA.objects.filter(a__f2='bar')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        # The ANDed a__f2 filter allows us to use keep using INNER JOIN
+        # even inside the ORed case. If the join to a__ returns nothing,
+        # the ANDed filter for a__f2 can't be true.
+        qs = qs.filter(Q(a__f1='foo') | Q(b__f2='foo'))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+
+    @unittest.expectedFailure
+    def test_disjunction_promotion3_failing(self):
+        # Now the ORed filter creates LOUTER join, but we do not have
+        # logic to unpromote it for the AND filter after it. The query
+        # results will be correct, but we have one LOUTER JOIN too much
+        # currently.
+        qs = BaseA.objects.filter(
+            Q(a__f1='foo') | Q(b__f2='foo')).filter(a__f2='bar')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+
+    def test_disjunction_promotion4(self):
+        qs = BaseA.objects.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('JOIN'), 0)
+        qs = qs.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        qs = BaseA.objects.filter(a__f1='foo')
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        qs = qs.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+
+    def test_disjunction_promotion5(self):
+        qs = BaseA.objects.filter(Q(a=1) | Q(a=2))
+        # Note that the above filters on a force the join to an
+        # inner join even if it is trimmed.
+        self.assertEqual(str(qs.query).count('JOIN'), 0)
+        qs = qs.filter(Q(a__f1='foo') | Q(b__f1='foo'))
+        # So, now the a__f1 join doesn't need promotion.
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+
+    @unittest.expectedFailure
+    def test_disjunction_promotion5_failing(self):
+        qs = BaseA.objects.filter(Q(a__f1='foo') | Q(b__f1='foo'))
+        # Now the join to a is created as LOUTER
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 0)
+        # The below filter should force the a to be inner joined. But,
+        # this is failing as we do not have join unpromotion logic.
+        qs = BaseA.objects.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+
+    def test_disjunction_promotion6(self):
+        qs = BaseA.objects.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('JOIN'), 0)
+        qs = BaseA.objects.filter(Q(a__f1='foo') & Q(b__f1='foo'))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 2)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 0)
+
+        qs = BaseA.objects.filter(Q(a__f1='foo') & Q(b__f1='foo'))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 0)
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 2)
+        qs = qs.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 2)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 0)
+
+    def test_disjunction_promotion7(self):
+        qs = BaseA.objects.filter(Q(a=1) | Q(a=2))
+        self.assertEqual(str(qs.query).count('JOIN'), 0)
+        qs = BaseA.objects.filter(Q(a__f1='foo') | (Q(b__f1='foo') & Q(a__f1='bar')))
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+        qs = BaseA.objects.filter(
+            (Q(a__f1='foo') | Q(b__f1='foo')) & (Q(a__f1='bar') | Q(c__f1='foo'))
+        )
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 3)
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 0)
+        qs = BaseA.objects.filter(
+            (Q(a__f1='foo') | (Q(a__f1='bar')) & (Q(b__f1='bar') | Q(c__f1='foo')))
+        )
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 2)
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+
+    def test_disjunction_promotion_fexpression(self):
+        qs = BaseA.objects.filter(Q(a__f1=F('b__f1')) | Q(b__f1='foo'))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 1)
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 1)
+        qs = BaseA.objects.filter(Q(a__f1=F('c__f1')) | Q(b__f1='foo'))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 3)
+        qs = BaseA.objects.filter(Q(a__f1=F('b__f1')) | Q(a__f2=F('b__f2')) | Q(c__f1='foo'))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 3)
+        qs = BaseA.objects.filter(Q(a__f1=F('c__f1')) | (Q(pk=1) & Q(pk=2)))
+        self.assertEqual(str(qs.query).count('LEFT OUTER JOIN'), 2)
+        self.assertEqual(str(qs.query).count('INNER JOIN'), 0)

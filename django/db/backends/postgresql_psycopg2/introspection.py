@@ -1,6 +1,6 @@
 from __future__ import unicode_literals
 
-from django.db.backends import BaseDatabaseIntrospection
+from django.db.backends import BaseDatabaseIntrospection, FieldInfo
 
 
 class DatabaseIntrospection(BaseDatabaseIntrospection):
@@ -45,7 +45,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             WHERE table_name = %s""", [table_name])
         null_map = dict(cursor.fetchall())
         cursor.execute("SELECT * FROM %s LIMIT 1" % self.connection.ops.quote_name(table_name))
-        return [line[:6] + (null_map[line[0]]=='YES',)
+        return [FieldInfo(*(line[:6] + (null_map[line[0]]=='YES',)))
                 for line in cursor.description]
 
     def get_relations(self, cursor, table_name):
@@ -65,6 +65,23 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             # row[0] and row[1] are single-item lists, so grab the single item.
             relations[row[0][0] - 1] = (row[1][0] - 1, row[2])
         return relations
+
+    def get_key_columns(self, cursor, table_name):
+        key_columns = []
+        cursor.execute("""
+            SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column
+            FROM information_schema.constraint_column_usage ccu
+            LEFT JOIN information_schema.key_column_usage kcu
+                ON ccu.constraint_catalog = kcu.constraint_catalog
+                    AND ccu.constraint_schema = kcu.constraint_schema
+                    AND ccu.constraint_name = kcu.constraint_name
+            LEFT JOIN information_schema.table_constraints tc
+                ON ccu.constraint_catalog = tc.constraint_catalog
+                    AND ccu.constraint_schema = tc.constraint_schema
+                    AND ccu.constraint_name = tc.constraint_name
+            WHERE kcu.table_name = %s AND tc.constraint_type = 'FOREIGN KEY'""" , [table_name])
+        key_columns.extend(cursor.fetchall())
+        return key_columns
 
     def get_indexes(self, cursor, table_name):
         # This query retrieves each index on the given table, including the

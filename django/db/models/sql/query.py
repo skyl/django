@@ -18,13 +18,14 @@ from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import ExpressionNode
 from django.db.models.fields import FieldDoesNotExist
 from django.db.models.loading import get_model
+from django.db.models.related import PathInfo
 from django.db.models.sql import aggregates as base_aggregates_module
 from django.db.models.sql.constants import (QUERY_TERMS, ORDER_DIR, SINGLE,
-        ORDER_PATTERN, REUSE_ALL, JoinInfo, SelectInfo, PathInfo)
+        ORDER_PATTERN, JoinInfo, SelectInfo)
 from django.db.models.sql.datastructures import EmptyResultSet, Empty, MultiJoin
 from django.db.models.sql.expressions import SQLEvaluator
 from django.db.models.sql.where import (WhereNode, Constraint, EverythingNode,
-    ExtraWhere, AND, OR)
+    ExtraWhere, AND, OR, EmptyWhere)
 from django.core.exceptions import FieldError
 
 __all__ = ['Query', 'RawQuery']
@@ -278,13 +279,13 @@ class Query(object):
         obj.select = self.select[:]
         obj.related_select_cols = []
         obj.tables = self.tables[:]
-        obj.where = copy.deepcopy(self.where, memo=memo)
+        obj.where = self.where.clone()
         obj.where_class = self.where_class
         if self.group_by is None:
             obj.group_by = None
         else:
             obj.group_by = self.group_by[:]
-        obj.having = copy.deepcopy(self.having, memo=memo)
+        obj.having = self.having.clone()
         obj.order_by = self.order_by[:]
         obj.low_mark, obj.high_mark = self.low_mark, self.high_mark
         obj.distinct = self.distinct
@@ -292,7 +293,9 @@ class Query(object):
         obj.select_for_update = self.select_for_update
         obj.select_for_update_nowait = self.select_for_update_nowait
         obj.select_related = self.select_related
-        obj.aggregates = copy.deepcopy(self.aggregates, memo=memo)
+        obj.related_select_cols = []
+        obj.aggregates = SortedDict((k, v.clone())
+                                    for k, v in self.aggregates.items())
         if self.aggregate_select_mask is None:
             obj.aggregate_select_mask = None
         else:
@@ -315,7 +318,7 @@ class Query(object):
             obj._extra_select_cache = self._extra_select_cache.copy()
         obj.extra_tables = self.extra_tables
         obj.extra_order_by = self.extra_order_by
-        obj.deferred_loading = copy.deepcopy(self.deferred_loading, memo=memo)
+        obj.deferred_loading = copy.copy(self.deferred_loading[0]), self.deferred_loading[1]
         if self.filter_is_sticky and self.used_aliases:
             obj.used_aliases = self.used_aliases.copy()
         else:
@@ -548,7 +551,7 @@ class Query(object):
         # Now relabel a copy of the rhs where-clause and add it to the current
         # one.
         if rhs.where:
-            w = copy.deepcopy(rhs.where)
+            w = rhs.where.clone()
             w.relabel_aliases(change_map)
             if not self.where:
                 # Since 'self' matches everything, add an explicit "include
@@ -570,7 +573,7 @@ class Query(object):
                 new_col = change_map.get(col[0], col[0]), col[1]
                 self.select.append(SelectInfo(new_col, field))
             else:
-                item = copy.deepcopy(col)
+                item = col.clone()
                 item.relabel_aliases(change_map)
                 self.select.append(SelectInfo(item, field))
 
@@ -772,17 +775,37 @@ class Query(object):
             unref_amount = cur_refcount - to_counts.get(alias, 0)
             self.unref_alias(alias, unref_amount)
 
-    def promote_unused_aliases(self, initial_refcounts, used_aliases):
+    def promote_disjunction(self, aliases_before, alias_usage_counts,
+                            num_childs):
         """
-        Given a "before" copy of the alias_refcounts dictionary (as
-        'initial_refcounts') and a collection of aliases that may have been
-        changed or created, works out which aliases have been created since
-        then and which ones haven't been used and promotes all of those
-        aliases, plus any children of theirs in the alias tree, to outer joins.
+        This method is to be used for promoting joins in ORed filters.
+
+        The principle for promotion is: any alias which is used (it is in
+        alias_usage_counts), is not used by every child of the ORed filter,
+        and isn't pre-existing needs to be promoted to LOUTER join.
+
+        Some examples (assume all joins used are nullable):
+            - existing filter: a__f1=foo
+            - add filter: b__f1=foo|b__f2=foo
+            In this case we should not promote either of the joins (using INNER
+            doesn't remove results). We correctly avoid join promotion, because
+            a is not used in this branch, and b is used two times.
+
+            - add filter a__f1=foo|b__f2=foo
+            In this case we should promote both a and b, otherwise they will
+            remove results. We will also correctly do that as both aliases are
+            used, and in addition both are used only once while there are two
+            filters.
+
+            - existing: a__f1=bar
+            - add filter: a__f2=foo|b__f2=foo
+            We will not promote a as it is previously used. If the join results
+            in null, the existing filter can't succeed.
+
+        The above (and some more) are tested in queries.DisjunctionPromotionTests
         """
-        for alias in self.tables:
-            if alias in used_aliases and (alias not in initial_refcounts or
-                    self.alias_refcount[alias] == initial_refcounts[alias]):
+        for alias, use_count in alias_usage_counts.items():
+            if use_count < num_childs and alias not in aliases_before:
                 self.promote_joins([alias])
 
     def change_aliases(self, change_map):
@@ -891,7 +914,7 @@ class Query(object):
         """
         return len([1 for count in self.alias_refcount.values() if count])
 
-    def join(self, connection, reuse=REUSE_ALL, promote=False,
+    def join(self, connection, reuse=None, promote=False,
              outer_if_first=False, nullable=False, join_field=None):
         """
         Returns an alias for the join in 'connection', either reusing an
@@ -902,10 +925,9 @@ class Query(object):
 
             lhs.lhs_col = table.col
 
-        The 'reuse' parameter can be used in three ways: it can be REUSE_ALL
-        which means all joins (matching the connection) are reusable, it can
-        be a set containing the aliases that can be reused, or it can be None
-        which means a new join is always created.
+        The 'reuse' parameter can be either None which means all joins
+        (matching the connection) are reusable, or it can be a set containing
+        the aliases that can be reused.
 
         If 'promote' is True, the join type for the alias will be LOUTER (if
         the alias previously existed, the join type will be promoted from INNER
@@ -925,11 +947,10 @@ class Query(object):
         The 'join_field' is the field we are joining along (if any).
         """
         lhs, table, lhs_col, col = connection
+        assert lhs is None or join_field is not None
         existing = self.join_map.get(connection, ())
-        if reuse == REUSE_ALL:
+        if reuse is None:
             reuse = existing
-        elif reuse is None:
-            reuse = set()
         else:
             reuse = [a for a in existing if a in reuse]
         for alias in reuse:
@@ -978,17 +999,46 @@ class Query(object):
         whereas column determination is a later part, and side-effect, of
         as_sql()).
         """
-        # Skip all proxy models
-        opts = self.model._meta.concrete_model._meta
+        opts = self.model._meta
         root_alias = self.tables[0]
         seen = {None: root_alias}
 
         for field, model in opts.get_fields_with_model():
             if model not in seen:
-                link_field = opts.get_ancestor_link(model)
-                seen[model] = self.join((root_alias, model._meta.db_table,
-                        link_field.column, model._meta.pk.column))
+                self.join_parent_model(opts, model, root_alias, seen)
         self.included_inherited_models = seen
+
+    def join_parent_model(self, opts, model, alias, seen):
+        """
+        Makes sure the given 'model' is joined in the query. If 'model' isn't
+        a parent of 'opts' or if it is None this method is a no-op.
+
+        The 'alias' is the root alias for starting the join, 'seen' is a dict
+        of model -> alias of existing joins. It must also contain a mapping
+        of None -> some alias. This will be returned in the no-op case.
+        """
+        if model in seen:
+            return seen[model]
+        int_opts = opts
+        chain = opts.get_base_chain(model)
+        if chain is None:
+            return alias
+        for int_model in chain:
+            if int_model in seen:
+                return seen[int_model]
+            # Proxy model have elements in base chain
+            # with no parents, assign the new options
+            # object and skip to the next base in that
+            # case
+            if not int_opts.parents[int_model]:
+                int_opts = int_model._meta
+                continue
+            link_field = int_opts.get_ancestor_link(int_model)
+            int_opts = int_model._meta
+            connection = (alias, int_opts.db_table, link_field.column, int_opts.pk.column)
+            alias = seen[int_model] = self.join(connection, nullable=False,
+                                                join_field=link_field)
+        return alias or seen[None]
 
     def remove_inherited_models(self):
         """
@@ -1040,7 +1090,7 @@ class Query(object):
             # then we need to explore the joins that are required.
 
             field, source, opts, join_list, path = self.setup_joins(
-                field_list, opts, self.get_initial_alias(), REUSE_ALL)
+                field_list, opts, self.get_initial_alias())
 
             # Process the join chain to see if it can be trimmed
             col, _, join_list = self.trim_joins(source, join_list, path)
@@ -1153,55 +1203,18 @@ class Query(object):
                     can_reuse)
             return
 
-        table_promote = False
-        join_promote = False
-
         if (lookup_type == 'isnull' and value is True and not negate and
                 len(join_list) > 1):
             # If the comparison is against NULL, we may need to use some left
             # outer joins when creating the join chain. This is only done when
             # needed, as it's less efficient at the database level.
             self.promote_joins(join_list)
-            join_promote = True
 
         # Process the join list to see if we can remove any inner joins from
         # the far end (fewer tables in a query is better). Note that join
         # promotion must happen before join trimming to have the join type
         # information available when reusing joins.
         col, alias, join_list = self.trim_joins(target, join_list, path)
-
-        if connector == OR:
-            # Some joins may need to be promoted when adding a new filter to a
-            # disjunction. We walk the list of new joins and where it diverges
-            # from any previous joins (ref count is 1 in the table list), we
-            # make the new additions (and any existing ones not used in the new
-            # join list) an outer join.
-            join_it = iter(join_list)
-            table_it = iter(self.tables)
-            next(join_it), next(table_it)
-            unconditional = False
-            for join in join_it:
-                table = next(table_it)
-                # Once we hit an outer join, all subsequent joins must
-                # also be promoted, regardless of whether they have been
-                # promoted as a result of this pass through the tables.
-                unconditional = (unconditional or
-                    self.alias_map[join].join_type == self.LOUTER)
-                if join == table and self.alias_refcount[join] > 1:
-                    # We have more than one reference to this join table.
-                    # This means that we are dealing with two different query
-                    # subtrees, so we don't need to do any join promotion.
-                    continue
-                join_promote = join_promote or self.promote_joins([join], unconditional)
-                if table != join:
-                    table_promote = self.promote_joins([table])
-                # We only get here if we have found a table that exists
-                # in the join list, but isn't on the original tables list.
-                # This means we've reached the point where we only have
-                # new tables, so we can break out of this promotion loop.
-                break
-            self.promote_joins(join_it, join_promote)
-            self.promote_joins(table_it, table_promote or join_promote)
 
         if having_clause or force_having:
             if (alias, col) not in self.group_by:
@@ -1259,33 +1272,36 @@ class Query(object):
                 subtree = True
             else:
                 subtree = False
-            connector = AND
+            connector = q_object.connector
+            if connector == OR:
+                alias_usage_counts = dict()
+                aliases_before = set(self.tables)
             if q_object.connector == OR and not force_having:
                 force_having = self.need_force_having(q_object)
             for child in q_object.children:
-                if connector == OR:
-                    refcounts_before = self.alias_refcount.copy()
                 if force_having:
                     self.having.start_subtree(connector)
                 else:
                     self.where.start_subtree(connector)
+                if connector == OR:
+                    refcounts_before = self.alias_refcount.copy()
                 if isinstance(child, Node):
                     self.add_q(child, used_aliases, force_having=force_having)
                 else:
                     self.add_filter(child, connector, q_object.negated,
                             can_reuse=used_aliases, force_having=force_having)
+                if connector == OR:
+                    used = alias_diff(refcounts_before, self.alias_refcount)
+                    for alias in used:
+                        alias_usage_counts[alias] = alias_usage_counts.get(alias, 0) + 1
                 if force_having:
                     self.having.end_subtree()
                 else:
                     self.where.end_subtree()
 
-                if connector == OR:
-                    # Aliases that were newly added or not used at all need to
-                    # be promoted to outer joins if they are nullable relations.
-                    # (they shouldn't turn the whole conditional into the empty
-                    # set just because they don't match anything).
-                    self.promote_unused_aliases(refcounts_before, used_aliases)
-                connector = q_object.connector
+            if connector == OR:
+                self.promote_disjunction(aliases_before, alias_usage_counts,
+                                         len(q_object.children))
             if q_object.negated:
                 self.where.negate()
             if subtree:
@@ -1309,7 +1325,6 @@ class Query(object):
         contain the same value as the final field).
         """
         path = []
-        multijoin_pos = None
         for pos, name in enumerate(names):
             if name == 'pk':
                 name = opts.pk.name
@@ -1343,92 +1358,19 @@ class Query(object):
                         target = final_field.rel.get_related_field()
                         opts = int_model._meta
                         path.append(PathInfo(final_field, target, final_field.model._meta,
-                                             opts, final_field))
-            # We have five different cases to solve: foreign keys, reverse
-            # foreign keys, m2m fields (also reverse) and non-relational
-            # fields. We are mostly just using the related field API to
-            # fetch the from and to fields. The m2m fields are handled as
-            # two foreign keys, first one reverse, the second one direct.
-            if direct and not field.rel and not m2m:
+                                             opts, final_field, False, True))
+            if hasattr(field, 'get_path_info'):
+                pathinfos, opts, target, final_field = field.get_path_info()
+                path.extend(pathinfos)
+            else:
                 # Local non-relational field.
                 final_field = target = field
                 break
-            elif direct and not m2m:
-                # Foreign Key
-                opts = field.rel.to._meta
-                target = field.rel.get_related_field()
-                final_field = field
-                from_opts = field.model._meta
-                path.append(PathInfo(field, target, from_opts, opts, field))
-            elif not direct and not m2m:
-                # Revere foreign key
-                final_field = to_field = field.field
-                opts = to_field.model._meta
-                from_field = to_field.rel.get_related_field()
-                from_opts = from_field.model._meta
-                path.append(
-                    PathInfo(from_field, to_field, from_opts, opts, to_field))
-                if from_field.model is to_field.model:
-                    # Recursive foreign key to self.
-                    target = opts.get_field_by_name(
-                        field.field.rel.field_name)[0]
-                else:
-                    target = opts.pk
-            elif direct and m2m:
-                if not field.rel.through:
-                    # Gotcha! This is just a fake m2m field - a generic relation
-                    # field).
-                    from_field = opts.pk
-                    opts = field.rel.to._meta
-                    target = opts.get_field_by_name(field.object_id_field_name)[0]
-                    final_field = field
-                    # Note that we are using different field for the join_field
-                    # than from_field or to_field. This is a hack, but we need the
-                    # GenericRelation to generate the extra SQL.
-                    path.append(PathInfo(from_field, target, field.model._meta, opts,
-                                         field))
-                else:
-                    # m2m field. We are travelling first to the m2m table along a
-                    # reverse relation, then from m2m table to the target table.
-                    from_field1 = opts.get_field_by_name(
-                        field.m2m_target_field_name())[0]
-                    opts = field.rel.through._meta
-                    to_field1 = opts.get_field_by_name(field.m2m_field_name())[0]
-                    path.append(
-                        PathInfo(from_field1, to_field1, from_field1.model._meta,
-                                 opts, to_field1))
-                    final_field = from_field2 = opts.get_field_by_name(
-                        field.m2m_reverse_field_name())[0]
-                    opts = field.rel.to._meta
-                    target = to_field2 = opts.get_field_by_name(
-                        field.m2m_reverse_target_field_name())[0]
-                    path.append(
-                        PathInfo(from_field2, to_field2, from_field2.model._meta,
-                                 opts, from_field2))
-            elif not direct and m2m:
-                # This one is just like above, except we are travelling the
-                # fields in opposite direction.
-                field = field.field
-                from_field1 = opts.get_field_by_name(
-                    field.m2m_reverse_target_field_name())[0]
-                int_opts = field.rel.through._meta
-                to_field1 = int_opts.get_field_by_name(
-                    field.m2m_reverse_field_name())[0]
-                path.append(
-                    PathInfo(from_field1, to_field1, from_field1.model._meta,
-                             int_opts, to_field1))
-                final_field = from_field2 = int_opts.get_field_by_name(
-                    field.m2m_field_name())[0]
-                opts = field.opts
-                target = to_field2 = opts.get_field_by_name(
-                    field.m2m_target_field_name())[0]
-                path.append(PathInfo(from_field2, to_field2, from_field2.model._meta,
-                                     opts, from_field2))
-
-            if m2m and multijoin_pos is None:
-                multijoin_pos = pos
-            if not direct and not path[-1].to_field.unique and multijoin_pos is None:
-                multijoin_pos = pos
+        multijoin_pos = None
+        for m2mpos, pathinfo in enumerate(path):
+            if pathinfo.m2m:
+                multijoin_pos = m2mpos
+                break
 
         if pos != len(names) - 1:
             if pos == len(names) - 2:
@@ -1441,7 +1383,7 @@ class Query(object):
             raise MultiJoin(multijoin_pos + 1)
         return path, final_field, target
 
-    def setup_joins(self, names, opts, alias, can_reuse, allow_many=True,
+    def setup_joins(self, names, opts, alias, can_reuse=None, allow_many=True,
                     allow_explicit_fk=False):
         """
         Compute the necessary table joins for the passage through the fields
@@ -1450,9 +1392,9 @@ class Query(object):
         the table to start the joining from.
 
         The 'can_reuse' defines the reverse foreign key joins we can reuse. It
-        can be sql.constants.REUSE_ALL in which case all joins are reusable
-        or a set of aliases that can be reused. Note that Non-reverse foreign
-        keys are always reusable.
+        can be None in which case all joins are reusable or a set of aliases
+        that can be reused. Note that non-reverse foreign keys are always
+        reusable when using setup_joins().
 
         If 'allow_many' is False, then any reverse foreign key seen will
         generate a MultiJoin exception.
@@ -1478,15 +1420,15 @@ class Query(object):
         # joins at this stage - we will need the information about join type
         # of the trimmed joins.
         for pos, join in enumerate(path):
-            from_field, to_field, from_opts, opts, join_field = join
-            direct = join_field == from_field
-            if direct:
-                nullable = self.is_nullable(from_field)
+            opts = join.to_opts
+            if join.direct:
+                nullable = self.is_nullable(join.from_field)
             else:
                 nullable = True
-            connection = alias, opts.db_table, from_field.column, to_field.column
-            alias = self.join(connection, reuse=can_reuse, nullable=nullable,
-                              join_field=join_field)
+            connection = alias, opts.db_table, join.from_field.column, join.to_field.column
+            reuse = can_reuse if join.m2m else None
+            alias = self.join(connection, reuse=reuse,
+                              nullable=nullable, join_field=join.join_field)
             joins.append(alias)
         return final_field, target, opts, joins, path
 
@@ -1505,8 +1447,7 @@ class Query(object):
         the join.
         """
         for info in reversed(path):
-            direct = info.join_field == info.from_field
-            if info.to_field == target and direct:
+            if info.to_field == target and info.direct:
                 target = info.from_field
                 self.unref_alias(joins.pop())
             else:
@@ -1571,6 +1512,13 @@ class Query(object):
         if active_positions > 1:
             self.add_filter(('%s__isnull' % trimmed_prefix, False), negate=True,
                     can_reuse=can_reuse)
+
+    def set_empty(self):
+        self.where = EmptyWhere()
+        self.having = EmptyWhere()
+
+    def is_empty(self):
+        return isinstance(self.where, EmptyWhere) or isinstance(self.having, EmptyWhere)
 
     def set_limits(self, low=None, high=None):
         """
@@ -1643,7 +1591,7 @@ class Query(object):
         try:
             for name in field_names:
                 field, target, u2, joins, u3 = self.setup_joins(
-                        name.split(LOOKUP_SEP), opts, alias, REUSE_ALL, allow_m2m,
+                        name.split(LOOKUP_SEP), opts, alias, None, allow_m2m,
                         True)
                 final_alias = joins[-1]
                 col = target.column
@@ -1690,7 +1638,7 @@ class Query(object):
         else:
             self.default_ordering = False
 
-    def clear_ordering(self, force_empty=False):
+    def clear_ordering(self, force_empty):
         """
         Removes any ordering settings. If 'force_empty' is True, there will be
         no ordering in the resulting query (not even the model's default).
@@ -1729,8 +1677,9 @@ class Query(object):
         else:
             opts = self.model._meta
             if not self.select:
-                count = self.aggregates_module.Count((self.join((None, opts.db_table, None, None)), opts.pk.column),
-                                         is_summary=True, distinct=True)
+                count = self.aggregates_module.Count(
+                    (self.join((None, opts.db_table, None, None)), opts.pk.column),
+                    is_summary=True, distinct=True)
             else:
                 # Because of SQL portability issues, multi-column, distinct
                 # counts need a sub-query -- see get_count() for details.
@@ -1934,7 +1883,7 @@ class Query(object):
         opts = self.model._meta
         alias = self.get_initial_alias()
         field, col, opts, joins, extra = self.setup_joins(
-                start.split(LOOKUP_SEP), opts, alias, REUSE_ALL)
+                start.split(LOOKUP_SEP), opts, alias)
         select_col = self.alias_map[joins[1]].lhs_join_col
         select_alias = alias
 
@@ -2006,3 +1955,11 @@ def is_reverse_o2o(field):
     expected to be some sort of relation field or related object.
     """
     return not hasattr(field, 'rel') and field.field.unique
+
+def alias_diff(refcounts_before, refcounts_after):
+    """
+    Given the before and after copies of refcounts works out which aliases
+    have been added to the after copy.
+    """
+    return set(t for t in refcounts_after
+               if refcounts_after[t] > refcounts_before.get(t, 0))

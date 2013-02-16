@@ -1,5 +1,7 @@
 from __future__ import unicode_literals
 
+import re
+
 from django.core.management import call_command
 from django.db import connection
 from django.test import TestCase, skipUnlessDBFeature
@@ -21,6 +23,68 @@ class InspectDBTestCase(TestCase):
         # inspected
         self.assertNotIn("class DjangoContentType(models.Model):", out.getvalue(), msg=error_message)
 
+    def test_field_types(self):
+        """Test introspection of various Django field types"""
+        out = StringIO()
+        call_command('inspectdb',
+                     table_name_filter=lambda tn:tn.startswith('inspectdb_columntypes'),
+                     stdout=out)
+        output = out.getvalue()
+        def assertFieldType(name, definition):
+            out_def = re.search(r'^\s*%s = (models.*)$' % name, output, re.MULTILINE).groups()[0]
+            self.assertEqual(definition, out_def)
+
+        assertFieldType('id', "models.IntegerField(primary_key=True)")
+        assertFieldType('big_int_field', "models.BigIntegerField()")
+        if connection.vendor == 'mysql':
+            # No native boolean type on MySQL
+            assertFieldType('bool_field', "models.IntegerField()")
+            assertFieldType('null_bool_field', "models.IntegerField(blank=True, null=True)")
+        else:
+            assertFieldType('bool_field', "models.BooleanField()")
+            assertFieldType('null_bool_field', "models.NullBooleanField()")
+        assertFieldType('char_field', "models.CharField(max_length=10)")
+        assertFieldType('comma_separated_int_field', "models.CharField(max_length=99)")
+        assertFieldType('date_field', "models.DateField()")
+        assertFieldType('date_time_field', "models.DateTimeField()")
+        if connection.vendor == 'sqlite':
+            # Ticket #5014
+            assertFieldType('decimal_field', "models.DecimalField(max_digits=None, decimal_places=None)")
+        elif connection.vendor == 'mysql':
+            pass # Ticket #5014
+        else:
+            assertFieldType('decimal_field', "models.DecimalField(max_digits=6, decimal_places=1)")
+        assertFieldType('email_field', "models.CharField(max_length=75)")
+        assertFieldType('file_field', "models.CharField(max_length=100)")
+        assertFieldType('file_path_field', "models.CharField(max_length=100)")
+        assertFieldType('float_field', "models.FloatField()")
+        assertFieldType('int_field', "models.IntegerField()")
+        if connection.vendor == 'postgresql':
+            # Only PostgreSQL has a specific type
+            assertFieldType('ip_address_field', "models.GenericIPAddressField()")
+            assertFieldType('gen_ip_adress_field', "models.GenericIPAddressField()")
+        else:
+            assertFieldType('ip_address_field', "models.CharField(max_length=15)")
+            assertFieldType('gen_ip_adress_field', "models.CharField(max_length=39)")
+        if connection.vendor == 'sqlite':
+            assertFieldType('pos_int_field', "models.PositiveIntegerField()")
+            assertFieldType('pos_small_int_field', "models.PositiveSmallIntegerField()")
+        else:
+            # 'unsigned' property undetected on other backends
+            assertFieldType('pos_int_field', "models.IntegerField()")
+            if connection.vendor == 'postgresql':
+                assertFieldType('pos_small_int_field', "models.SmallIntegerField()")
+            else:
+                assertFieldType('pos_small_int_field', "models.IntegerField()")
+        assertFieldType('slug_field', "models.CharField(max_length=50)")
+        if connection.vendor in ('sqlite', 'postgresql'):
+            assertFieldType('small_int_field', "models.SmallIntegerField()")
+        else:
+            assertFieldType('small_int_field', "models.IntegerField()")
+        assertFieldType('text_field', "models.TextField()")
+        assertFieldType('time_field', "models.TimeField()")
+        assertFieldType('url_field', "models.CharField(max_length=200)")
+
     @skipUnlessDBFeature('can_introspect_foreign_keys')
     def test_attribute_name_not_python_keyword(self):
         out = StringIO()
@@ -31,6 +95,8 @@ class InspectDBTestCase(TestCase):
                      stdout=out)
         output = out.getvalue()
         error_message = "inspectdb generated an attribute name which is a python keyword"
+        # Recursive foreign keys should be set to 'self'
+        self.assertIn("parent = models.ForeignKey('self')", output)
         self.assertNotIn("from = models.ForeignKey(InspectdbPeople)", output, msg=error_message)
         # As InspectdbPeople model is defined after InspectdbMessage, it should be quoted
         self.assertIn("from_field = models.ForeignKey('InspectdbPeople', db_column='from_id')",
@@ -74,3 +140,13 @@ class InspectDBTestCase(TestCase):
         self.assertIn("field_field_0 = models.IntegerField(db_column='%s__')" % base_name, output)
         self.assertIn("field_field_1 = models.IntegerField(db_column='__field')", output)
         self.assertIn("prc_x = models.IntegerField(db_column='prc(%) x')", output)
+
+    def test_managed_models(self):
+        """Test that by default the command generates models with `Meta.managed = False` (#14305)"""
+        out = StringIO()
+        call_command('inspectdb',
+                     table_name_filter=lambda tn:tn.startswith('inspectdb_columntypes'),
+                     stdout=out)
+        output = out.getvalue()
+        self.longMessage = False
+        self.assertIn("        managed = False", output, msg='inspectdb should generate unmanaged models.')

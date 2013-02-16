@@ -26,6 +26,8 @@ to (see `Serialization formats`_) and a
 argument can be any iterator that yields Django model instances, but it'll
 almost always be a QuerySet).
 
+.. function:: django.core.serializers.get_serializer(format)
+
 You can also use a serializer object directly::
 
     XMLSerializer = serializers.get_serializer("xml")
@@ -43,7 +45,7 @@ This is useful if you want to serialize data directly to a file-like object
 
     Calling :func:`~django.core.serializers.get_serializer` with an unknown
     :ref:`format <serialization-formats>` will raise a
-    :class:`~django.core.serializers.SerializerDoesNotExist` exception.
+    ``django.core.serializers.SerializerDoesNotExist`` exception.
 
 Subset of fields
 ~~~~~~~~~~~~~~~~
@@ -193,7 +195,7 @@ This strategy works well for most objects, but it can cause difficulty in some
 circumstances.
 
 Consider the case of a list of objects that have a foreign key referencing
-:class:`~django.contrib.conttenttypes.models.ContentType`. If you're going to
+:class:`~django.contrib.contenttypes.models.ContentType`. If you're going to
 serialize an object that refers to a content type, then you need to have a way
 to refer to that content type to begin with. Since ``ContentType`` objects are
 automatically created by Django during the database synchronization process,

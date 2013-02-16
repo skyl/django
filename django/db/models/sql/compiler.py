@@ -1,17 +1,20 @@
-from django.utils.six.moves import zip
+import datetime
 
+from django.conf import settings
 from django.core.exceptions import FieldError
 from django.db import transaction
 from django.db.backends.util import truncate_name
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.query_utils import select_related_descend
 from django.db.models.sql.constants import (SINGLE, MULTI, ORDER_DIR,
-        GET_ITERATOR_CHUNK_SIZE, REUSE_ALL, SelectInfo)
+        GET_ITERATOR_CHUNK_SIZE, SelectInfo)
 from django.db.models.sql.datastructures import EmptyResultSet
 from django.db.models.sql.expressions import SQLEvaluator
 from django.db.models.sql.query import get_order_dir, Query
 from django.db.utils import DatabaseError
 from django.utils import six
+from django.utils.six.moves import zip
+from django.utils import timezone
 
 
 class SQLCompiler(object):
@@ -71,7 +74,7 @@ class SQLCompiler(object):
         # as the pre_sql_setup will modify query state in a way that forbids
         # another run of it.
         self.refcounts_before = self.query.alias_refcount.copy()
-        out_cols = self.get_columns(with_col_aliases)
+        out_cols, s_params = self.get_columns(with_col_aliases)
         ordering, ordering_group_by = self.get_ordering()
 
         distinct_fields = self.get_distinct()
@@ -94,6 +97,7 @@ class SQLCompiler(object):
             result.append(self.connection.ops.distinct_sql(distinct_fields))
 
         result.append(', '.join(out_cols + self.query.ordering_aliases))
+        params.extend(s_params)
 
         result.append('FROM')
         result.extend(from_)
@@ -161,9 +165,10 @@ class SQLCompiler(object):
 
     def get_columns(self, with_aliases=False):
         """
-        Returns the list of columns to use in the select statement. If no
-        columns have been specified, returns all columns relating to fields in
-        the model.
+        Returns the list of columns to use in the select statement, as well as
+        a list any extra parameters that need to be included. If no columns
+        have been specified, returns all columns relating to fields in the
+        model.
 
         If 'with_aliases' is true, any column names that are duplicated
         (without the table names) are given unique aliases. This is needed in
@@ -172,6 +177,7 @@ class SQLCompiler(object):
         qn = self.quote_name_unless_alias
         qn2 = self.connection.ops.quote_name
         result = ['(%s) AS %s' % (col[0], qn2(alias)) for alias, col in six.iteritems(self.query.extra_select)]
+        params = []
         aliases = set(self.query.extra_select.keys())
         if with_aliases:
             col_aliases = aliases.copy()
@@ -201,7 +207,9 @@ class SQLCompiler(object):
                         aliases.add(r)
                         col_aliases.add(col[1])
                 else:
-                    result.append(col.as_sql(qn, self.connection))
+                    col_sql, col_params = col.as_sql(qn, self.connection)
+                    result.append(col_sql)
+                    params.extend(col_params)
 
                     if hasattr(col, 'alias'):
                         aliases.add(col.alias)
@@ -214,15 +222,13 @@ class SQLCompiler(object):
             aliases.update(new_aliases)
 
         max_name_length = self.connection.ops.max_name_length()
-        result.extend([
-            '%s%s' % (
-                aggregate.as_sql(qn, self.connection),
-                alias is not None
-                    and ' AS %s' % qn(truncate_name(alias, max_name_length))
-                    or ''
-            )
-            for alias, aggregate in self.query.aggregate_select.items()
-        ])
+        for alias, aggregate in self.query.aggregate_select.items():
+            agg_sql, agg_params = aggregate.as_sql(qn, self.connection)
+            if alias is None:
+                result.append(agg_sql)
+            else:
+                result.append('%s AS %s' % (agg_sql, qn(truncate_name(alias, max_name_length))))
+            params.extend(agg_params)
 
         for (table, col), _ in self.query.related_select_cols:
             r = '%s.%s' % (qn(table), qn(col))
@@ -237,7 +243,7 @@ class SQLCompiler(object):
                 col_aliases.add(col)
 
         self._select_aliases = aliases
-        return result
+        return result, params
 
     def get_default_columns(self, with_aliases=False, col_aliases=None,
             start_alias=None, opts=None, as_pairs=False, from_parent=None):
@@ -255,33 +261,18 @@ class SQLCompiler(object):
         result = []
         if opts is None:
             opts = self.query.model._meta
-        # Skip all proxy to the root proxied model
-        opts = opts.concrete_model._meta
         qn = self.quote_name_unless_alias
         qn2 = self.connection.ops.quote_name
         aliases = set()
         only_load = self.deferred_to_columns()
-
+        seen = self.query.included_inherited_models.copy()
         if start_alias:
-            seen = {None: start_alias}
+            seen[None] = start_alias
         for field, model in opts.get_fields_with_model():
             if from_parent and model is not None and issubclass(from_parent, model):
                 # Avoid loading data for already loaded parents.
                 continue
-            if start_alias:
-                try:
-                    alias = seen[model]
-                except KeyError:
-                    link_field = opts.get_ancestor_link(model)
-                    alias = self.query.join((start_alias, model._meta.db_table,
-                            link_field.column, model._meta.pk.column),
-                            join_field=link_field)
-                    seen[model] = alias
-            else:
-                # If we're starting from the base model of the queryset, the
-                # aliases will have already been set up in pre_sql_setup(), so
-                # we can save time here.
-                alias = self.query.included_inherited_models[model]
+            alias = self.query.join_parent_model(opts, model, start_alias, seen)
             table = self.query.alias_map[alias].table_name
             if table in only_load and field.column not in only_load[table]:
                 continue
@@ -450,7 +441,7 @@ class SQLCompiler(object):
         if not alias:
             alias = self.query.get_initial_alias()
         field, target, opts, joins, _ = self.query.setup_joins(
-            pieces, opts, alias, REUSE_ALL)
+            pieces, opts, alias)
         # We will later on need to promote those joins that were added to the
         # query afresh above.
         joins_to_promote = [j for j in joins if self.query.alias_refcount[j] < 2]
@@ -557,14 +548,16 @@ class SQLCompiler(object):
             seen = set()
             cols = self.query.group_by + select_cols
             for col in cols:
+                col_params = ()
                 if isinstance(col, (list, tuple)):
                     sql = '%s.%s' % (qn(col[0]), qn(col[1]))
                 elif hasattr(col, 'as_sql'):
-                    sql = col.as_sql(qn, self.connection)
+                    sql, col_params = col.as_sql(qn, self.connection)
                 else:
                     sql = '(%s)' % str(col)
                 if sql not in seen:
                     result.append(sql)
+                    params.extend(col_params)
                     seen.add(sql)
 
             # Still, we need to add all stuff in ordering (except if the backend can
@@ -623,26 +616,7 @@ class SQLCompiler(object):
                 continue
             table = f.rel.to._meta.db_table
             promote = nullable or f.null
-            if model:
-                int_opts = opts
-                alias = root_alias
-                alias_chain = []
-                for int_model in opts.get_base_chain(model):
-                    # Proxy model have elements in base chain
-                    # with no parents, assign the new options
-                    # object and skip to the next base in that
-                    # case
-                    if not int_opts.parents[int_model]:
-                        int_opts = int_model._meta
-                        continue
-                    lhs_col = int_opts.parents[int_model].column
-                    int_opts = int_model._meta
-                    alias = self.query.join((alias, int_opts.db_table, lhs_col,
-                            int_opts.pk.column),
-                            promote=promote)
-                    alias_chain.append(alias)
-            else:
-                alias = root_alias
+            alias = self.query.join_parent_model(opts, model, root_alias, {})
 
             alias = self.query.join((alias, table, f.column,
                     f.rel.get_related_field().column),
@@ -670,27 +644,8 @@ class SQLCompiler(object):
                                               only_load.get(model), reverse=True):
                     continue
 
+                alias = self.query.join_parent_model(opts, f.rel.to, root_alias, {})
                 table = model._meta.db_table
-                int_opts = opts
-                alias = root_alias
-                alias_chain = []
-                chain = opts.get_base_chain(f.rel.to)
-                if chain is not None:
-                    for int_model in chain:
-                        # Proxy model have elements in base chain
-                        # with no parents, assign the new options
-                        # object and skip to the next base in that
-                        # case
-                        if not int_opts.parents[int_model]:
-                            int_opts = int_model._meta
-                            continue
-                        lhs_col = int_opts.parents[int_model].column
-                        int_opts = int_model._meta
-                        alias = self.query.join(
-                            (alias, int_opts.db_table, lhs_col, int_opts.pk.column),
-                            promote=True,
-                        )
-                        alias_chain.append(alias)
                 alias = self.query.join(
                     (alias, table, f.rel.get_related_field().column, f.column),
                     promote=True, join_field=f
@@ -1041,17 +996,44 @@ class SQLAggregateCompiler(SQLCompiler):
         if qn is None:
             qn = self.quote_name_unless_alias
 
-        sql = ('SELECT %s FROM (%s) subquery' % (
-            ', '.join([
-                aggregate.as_sql(qn, self.connection)
-                for aggregate in self.query.aggregate_select.values()
-            ]),
-            self.query.subquery)
-        )
-        params = self.query.sub_params
-        return (sql, params)
+        sql, params = [], []
+        for aggregate in self.query.aggregate_select.values():
+            agg_sql, agg_params = aggregate.as_sql(qn, self.connection)
+            sql.append(agg_sql)
+            params.extend(agg_params)
+        sql = ', '.join(sql)
+        params = tuple(params)
+
+        sql = 'SELECT %s FROM (%s) subquery' % (sql, self.query.subquery)
+        params = params + self.query.sub_params
+        return sql, params
 
 class SQLDateCompiler(SQLCompiler):
+    def results_iter(self):
+        """
+        Returns an iterator over the results from executing this query.
+        """
+        resolve_columns = hasattr(self, 'resolve_columns')
+        if resolve_columns:
+            from django.db.models.fields import DateField
+            fields = [DateField()]
+        else:
+            from django.db.backends.util import typecast_date
+            needs_string_cast = self.connection.features.needs_datetime_string_cast
+
+        offset = len(self.query.extra_select)
+        for rows in self.execute_sql(MULTI):
+            for row in rows:
+                date = row[offset]
+                if resolve_columns:
+                    date = self.resolve_columns(row, fields)[offset]
+                elif needs_string_cast:
+                    date = typecast_date(str(date))
+                if isinstance(date, datetime.datetime):
+                    date = date.date()
+                yield date
+
+class SQLDateTimeCompiler(SQLCompiler):
     def results_iter(self):
         """
         Returns an iterator over the results from executing this query.
@@ -1067,13 +1049,17 @@ class SQLDateCompiler(SQLCompiler):
         offset = len(self.query.extra_select)
         for rows in self.execute_sql(MULTI):
             for row in rows:
-                date = row[offset]
+                datetime = row[offset]
                 if resolve_columns:
-                    date = self.resolve_columns(row, fields)[offset]
+                    datetime = self.resolve_columns(row, fields)[offset]
                 elif needs_string_cast:
-                    date = typecast_timestamp(str(date))
-                yield date
-
+                    datetime = typecast_timestamp(str(datetime))
+                # Datetimes are artifically returned in UTC on databases that
+                # don't support time zone. Restore the zone used in the query.
+                if settings.USE_TZ:
+                    datetime = datetime.replace(tzinfo=None)
+                    datetime = timezone.make_aware(datetime, self.query.tzinfo)
+                yield datetime
 
 def order_modified_iter(cursor, trim, sentinel):
     """

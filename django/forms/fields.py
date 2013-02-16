@@ -18,15 +18,17 @@ from io import BytesIO
 from django.core import validators
 from django.core.exceptions import ValidationError
 from django.forms.util import ErrorList, from_current_timezone, to_current_timezone
-from django.forms.widgets import (TextInput, PasswordInput, HiddenInput,
+from django.forms.widgets import (
+    TextInput, PasswordInput, EmailInput, URLInput, HiddenInput,
     MultipleHiddenInput, ClearableFileInput, CheckboxInput, Select,
     NullBooleanSelect, SelectMultiple, DateInput, DateTimeInput, TimeInput,
-    SplitDateTimeWidget, SplitHiddenDateTimeWidget, FILE_INPUT_CONTRADICTION)
+    SplitDateTimeWidget, SplitHiddenDateTimeWidget, FILE_INPUT_CONTRADICTION
+)
 from django.utils import formats
-from django.utils.encoding import smart_text, force_text
+from django.utils.encoding import smart_text, force_str, force_text
 from django.utils.ipv6 import clean_ipv6_address
 from django.utils import six
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import ugettext_lazy as _, ungettext_lazy
 
 # Provide this import for backwards compatibility.
 from django.core.validators import EMPTY_VALUES
@@ -174,6 +176,25 @@ class Field(object):
         Field.
         """
         return {}
+
+    def _has_changed(self, initial, data):
+        """
+        Return True if data differs from initial.
+        """
+        # For purposes of seeing whether something has changed, None is
+        # the same as an empty string, if the data or inital value we get
+        # is None, replace it w/ ''.
+        if data is None:
+            data_value = ''
+        else:
+            data_value = data
+        if initial is None:
+            initial_value = ''
+        else:
+            initial_value = initial
+        if force_text(initial_value) != force_text(data_value):
+            return True
+        return False
 
     def __deepcopy__(self, memo):
         result = copy.copy(self)
@@ -348,6 +369,13 @@ class BaseTemporalField(Field):
     def strptime(self, value, format):
         raise NotImplementedError('Subclasses must define this method.')
 
+    def _has_changed(self, initial, data):
+        try:
+            data = self.to_python(data)
+        except ValidationError:
+            return True
+        return self.to_python(initial) != data
+
 class DateField(BaseTemporalField):
     widget = DateInput
     input_formats = formats.get_format_lazy('DATE_INPUT_FORMATS')
@@ -369,7 +397,8 @@ class DateField(BaseTemporalField):
         return super(DateField, self).to_python(value)
 
     def strptime(self, value, format):
-        return datetime.datetime.strptime(value, format).date()
+        return datetime.datetime.strptime(force_str(value), format).date()
+
 
 class TimeField(BaseTemporalField):
     widget = TimeInput
@@ -390,7 +419,7 @@ class TimeField(BaseTemporalField):
         return super(TimeField, self).to_python(value)
 
     def strptime(self, value, format):
-        return datetime.datetime.strptime(value, format).time()
+        return datetime.datetime.strptime(force_str(value), format).time()
 
 class DateTimeField(BaseTemporalField):
     widget = DateTimeInput
@@ -428,7 +457,7 @@ class DateTimeField(BaseTemporalField):
         return from_current_timezone(result)
 
     def strptime(self, value, format):
-        return datetime.datetime.strptime(value, format)
+        return datetime.datetime.strptime(force_str(value), format)
 
 class RegexField(CharField):
     def __init__(self, regex, max_length=None, min_length=None, error_message=None, *args, **kwargs):
@@ -460,6 +489,7 @@ class RegexField(CharField):
     regex = property(_get_regex, _set_regex)
 
 class EmailField(CharField):
+    widget = EmailInput
     default_error_messages = {
         'invalid': _('Enter a valid email address.'),
     }
@@ -475,7 +505,10 @@ class FileField(Field):
         'invalid': _("No file was submitted. Check the encoding type on the form."),
         'missing': _("No file was submitted."),
         'empty': _("The submitted file is empty."),
-        'max_length': _('Ensure this filename has at most %(max)d characters (it has %(length)d).'),
+        'max_length': ungettext_lazy(
+            'Ensure this filename has at most %(max)d character (it has %(length)d).',
+            'Ensure this filename has at most %(max)d characters (it has %(length)d).',
+            'max'),
         'contradiction': _('Please either submit a file or check the clear checkbox, not both.')
     }
 
@@ -529,6 +562,12 @@ class FileField(Field):
             return initial
         return data
 
+    def _has_changed(self, initial, data):
+        if data is None:
+            return False
+        return True
+
+
 class ImageField(FileField):
     default_error_messages = {
         'invalid_image': _("Upload a valid image. The file you uploaded was either not an image or a corrupted image."),
@@ -576,6 +615,7 @@ class ImageField(FileField):
         return f
 
 class URLField(CharField):
+    widget = URLInput
     default_error_messages = {
         'invalid': _('Enter a valid URL.'),
     }
@@ -618,6 +658,7 @@ class URLField(CharField):
             value = urlunsplit(url_fields)
         return value
 
+
 class BooleanField(Field):
     widget = CheckboxInput
 
@@ -631,10 +672,20 @@ class BooleanField(Field):
             value = False
         else:
             value = bool(value)
-        value = super(BooleanField, self).to_python(value)
+        return super(BooleanField, self).to_python(value)
+
+    def validate(self, value):
         if not value and self.required:
             raise ValidationError(self.error_messages['required'])
-        return value
+
+    def _has_changed(self, initial, data):
+        # Sometimes data or initial could be None or '' which should be the
+        # same thing as False.
+        if initial == 'False':
+            # show_hidden_initial may have transformed False to 'False'
+            initial = False
+        return bool(initial) != bool(data)
+
 
 class NullBooleanField(BooleanField):
     """
@@ -659,6 +710,15 @@ class NullBooleanField(BooleanField):
 
     def validate(self, value):
         pass
+
+    def _has_changed(self, initial, data):
+        # None (unknown) and False (No) are not the same
+        if initial is not None:
+            initial = bool(initial)
+        if data is not None:
+            data = bool(data)
+        return initial != data
+
 
 class ChoiceField(Field):
     widget = Select
@@ -739,6 +799,7 @@ class TypedChoiceField(ChoiceField):
     def validate(self, value):
         pass
 
+
 class MultipleChoiceField(ChoiceField):
     hidden_widget = MultipleHiddenInput
     widget = SelectMultiple
@@ -764,6 +825,18 @@ class MultipleChoiceField(ChoiceField):
         for val in value:
             if not self.valid_value(val):
                 raise ValidationError(self.error_messages['invalid_choice'] % {'value': val})
+
+    def _has_changed(self, initial, data):
+        if initial is None:
+            initial = []
+        if data is None:
+            data = []
+        if len(initial) != len(data):
+            return True
+        initial_set = set([force_text(value) for value in initial])
+        data_set = set([force_text(value) for value in data])
+        return data_set != initial_set
+
 
 class TypedMultipleChoiceField(MultipleChoiceField):
     def __init__(self, *args, **kwargs):
@@ -898,6 +971,18 @@ class MultiValueField(Field):
         object created by combining the date and time in data_list.
         """
         raise NotImplementedError('Subclasses must implement this method.')
+
+    def _has_changed(self, initial, data):
+        if initial is None:
+            initial = ['' for x in range(0, len(data))]
+        else:
+            if not isinstance(initial, list):
+                initial = self.widget.decompress(initial)
+        for field, initial, data in zip(self.fields, initial, data):
+            if field._has_changed(initial, data):
+                return True
+        return False
+
 
 class FilePathField(ChoiceField):
     def __init__(self, path, match=None, recursive=False, allow_files=True,

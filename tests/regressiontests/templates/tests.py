@@ -54,6 +54,12 @@ except ImportError as e:
     else:
         raise
 
+# NumPy installed?
+try:
+    import numpy
+except ImportError:
+    numpy = False
+
 from . import filters
 
 #################################
@@ -370,13 +376,13 @@ class Templates(TestCase):
         # Regression test for #19280
         t = Template('{% url path.to.view %}')      # not quoted = old syntax
         c = Context()
-        with self.assertRaisesRegexp(urlresolvers.NoReverseMatch,
+        with six.assertRaisesRegex(self, urlresolvers.NoReverseMatch,
                 "The syntax changed in Django 1.5, see the docs."):
             t.render(c)
 
     def test_url_explicit_exception_for_old_syntax_at_compile_time(self):
         # Regression test for #19392
-        with self.assertRaisesRegexp(template.TemplateSyntaxError,
+        with six.assertRaisesRegex(self, template.TemplateSyntaxError,
                 "The syntax of 'url' changed in Django 1.5, see the docs."):
             t = Template('{% url my-view %}')      # not a variable = old syntax
 
@@ -1649,6 +1655,17 @@ class Templates(TestCase):
             'verbatim-tag05': ('{% verbatim %}{% endverbatim %}{% verbatim %}{% endverbatim %}', {}, ''),
             'verbatim-tag06': ("{% verbatim special %}Don't {% endverbatim %} just yet{% endverbatim special %}", {}, "Don't {% endverbatim %} just yet"),
         }
+
+        if numpy:
+            tests.update({
+                # Numpy's array-index syntax allows a template to access a certain item of a subscriptable object.
+                'numpy-array-index01': ("{{ var.1 }}", {"var": numpy.array(["first item", "second item"])}, "second item"),
+
+                # Fail silently when the array index is out of range.
+                'numpy-array-index02': ("{{ var.5 }}", {"var": numpy.array(["first item", "second item"])}, ("", "INVALID")),
+            })
+
+
         return tests
 
 class TemplateTagLoading(unittest.TestCase):

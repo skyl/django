@@ -22,7 +22,8 @@ from django.utils.safestring import mark_safe
 from django.utils import datetime_safe, formats, six
 
 __all__ = (
-    'Media', 'MediaDefiningClass', 'Widget', 'TextInput', 'PasswordInput',
+    'Media', 'MediaDefiningClass', 'Widget', 'TextInput',
+    'EmailInput', 'URLInput', 'PasswordInput',
     'HiddenInput', 'MultipleHiddenInput', 'ClearableFileInput',
     'FileInput', 'DateInput', 'DateTimeInput', 'TimeInput', 'Textarea', 'CheckboxInput',
     'Select', 'NullBooleanSelect', 'SelectMultiple', 'RadioSelect',
@@ -208,25 +209,6 @@ class Widget(six.with_metaclass(MediaDefiningClass)):
         """
         return data.get(name, None)
 
-    def _has_changed(self, initial, data):
-        """
-        Return True if data differs from initial.
-        """
-        # For purposes of seeing whether something has changed, None is
-        # the same as an empty string, if the data or inital value we get
-        # is None, replace it w/ ''.
-        if data is None:
-            data_value = ''
-        else:
-            data_value = data
-        if initial is None:
-            initial_value = ''
-        else:
-            initial_value = initial
-        if force_text(initial_value) != force_text(data_value):
-            return True
-        return False
-
     def id_for_label(self, id_):
         """
         Returns the HTML ID attribute of this Widget for use by a <label>,
@@ -268,6 +250,14 @@ class TextInput(Input):
         if attrs is not None:
             self.input_type = attrs.pop('type', self.input_type)
         super(TextInput, self).__init__(attrs)
+
+
+class EmailInput(TextInput):
+    input_type = 'email'
+
+
+class URLInput(TextInput):
+    input_type = 'url'
 
 
 class PasswordInput(TextInput):
@@ -325,10 +315,6 @@ class FileInput(Input):
         "File widgets take data from FILES, not POST"
         return files.get(name, None)
 
-    def _has_changed(self, initial, data):
-        if data is None:
-            return False
-        return True
 
 FILE_INPUT_CONTRADICTION = object()
 
@@ -426,17 +412,6 @@ class DateInput(TextInput):
             return value.strftime(self.format)
         return value
 
-    def _has_changed(self, initial, data):
-        # If our field has show_hidden_initial=True, initial will be a string
-        # formatted by HiddenInput using formats.localize_input, which is not
-        # necessarily the format used for this widget. Attempt to convert it.
-        try:
-            input_format = formats.get_format('DATE_INPUT_FORMATS')[0]
-            initial = datetime.datetime.strptime(initial, input_format).date()
-        except (TypeError, ValueError):
-            pass
-        return super(DateInput, self)._has_changed(self._format_value(initial), data)
-
 
 class DateTimeInput(TextInput):
     def __init__(self, attrs=None, format=None):
@@ -456,17 +431,6 @@ class DateTimeInput(TextInput):
             return value.strftime(self.format)
         return value
 
-    def _has_changed(self, initial, data):
-        # If our field has show_hidden_initial=True, initial will be a string
-        # formatted by HiddenInput using formats.localize_input, which is not
-        # necessarily the format used for this widget. Attempt to convert it.
-        try:
-            input_format = formats.get_format('DATETIME_INPUT_FORMATS')[0]
-            initial = datetime.datetime.strptime(initial, input_format)
-        except (TypeError, ValueError):
-            pass
-        return super(DateTimeInput, self)._has_changed(self._format_value(initial), data)
-
 
 class TimeInput(TextInput):
     def __init__(self, attrs=None, format=None):
@@ -484,17 +448,6 @@ class TimeInput(TextInput):
         elif hasattr(value, 'strftime'):
             return value.strftime(self.format)
         return value
-
-    def _has_changed(self, initial, data):
-        # If our field has show_hidden_initial=True, initial will be a string
-        # formatted by HiddenInput using formats.localize_input, which is not
-        # necessarily the format used for this  widget. Attempt to convert it.
-        try:
-            input_format = formats.get_format('TIME_INPUT_FORMATS')[0]
-            initial = datetime.datetime.strptime(initial, input_format).time()
-        except (TypeError, ValueError):
-            pass
-        return super(TimeInput, self)._has_changed(self._format_value(initial), data)
 
 
 # Defined at module level so that CheckboxInput is picklable (#17976)
@@ -530,10 +483,6 @@ class CheckboxInput(Widget):
             value = values.get(value.lower(), value)
         return bool(value)
 
-    def _has_changed(self, initial, data):
-        # Sometimes data or initial could be None or '' which should be the
-        # same thing as False.
-        return bool(initial) != bool(data)
 
 class Select(Widget):
     allow_multiple_selected = False
@@ -609,14 +558,6 @@ class NullBooleanSelect(Select):
                 'False': False,
                 False: False}.get(value, None)
 
-    def _has_changed(self, initial, data):
-        # For a NullBooleanSelect, None (unknown) and False (No)
-        # are not the same
-        if initial is not None:
-            initial = bool(initial)
-        if data is not None:
-            data = bool(data)
-        return initial != data
 
 class SelectMultiple(Select):
     allow_multiple_selected = True
@@ -636,16 +577,6 @@ class SelectMultiple(Select):
             return data.getlist(name)
         return data.get(name, None)
 
-    def _has_changed(self, initial, data):
-        if initial is None:
-            initial = []
-        if data is None:
-            data = []
-        if len(initial) != len(data):
-            return True
-        initial_set = set([force_text(value) for value in initial])
-        data_set = set([force_text(value) for value in data])
-        return data_set != initial_set
 
 @python_2_unicode_compatible
 class RadioInput(SubWidget):
@@ -751,17 +682,17 @@ class RadioSelect(Select):
 class CheckboxSelectMultiple(SelectMultiple):
     def render(self, name, value, attrs=None, choices=()):
         if value is None: value = []
-        has_id = attrs and 'id' in attrs
         final_attrs = self.build_attrs(attrs, name=name)
+        id_ = final_attrs.get('id', None)
         output = ['<ul>']
         # Normalize to strings
         str_values = set([force_text(v) for v in value])
         for i, (option_value, option_label) in enumerate(chain(self.choices, choices)):
             # If an ID attribute was given, add a numeric index as a suffix,
             # so that the checkboxes don't all have the same ID attribute.
-            if has_id:
-                final_attrs = dict(final_attrs, id='%s_%s' % (attrs['id'], i))
-                label_for = format_html(' for="{0}"', final_attrs['id'])
+            if id_:
+                final_attrs = dict(final_attrs, id='%s_%s' % (id_, i))
+                label_for = format_html(' for="{0}_{1}"', id_, i)
             else:
                 label_for = ''
 
@@ -840,17 +771,6 @@ class MultiWidget(Widget):
 
     def value_from_datadict(self, data, files, name):
         return [widget.value_from_datadict(data, files, name + '_%s' % i) for i, widget in enumerate(self.widgets)]
-
-    def _has_changed(self, initial, data):
-        if initial is None:
-            initial = ['' for x in range(0, len(data))]
-        else:
-            if not isinstance(initial, list):
-                initial = self.decompress(initial)
-        for widget, initial, data in zip(self.widgets, initial, data):
-            if widget._has_changed(initial, data):
-                return True
-        return False
 
     def format_output(self, rendered_widgets):
         """

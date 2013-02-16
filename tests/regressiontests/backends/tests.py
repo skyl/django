@@ -12,10 +12,11 @@ from django.db import (backend, connection, connections, DEFAULT_DB_ALIAS,
     IntegrityError, transaction)
 from django.db.backends.signals import connection_created
 from django.db.backends.postgresql_psycopg2 import version as pg_version
+from django.db.models import fields, Sum, Avg, Variance, StdDev
 from django.db.utils import ConnectionHandler, DatabaseError, load_backend
 from django.test import (TestCase, skipUnlessDBFeature, skipIfDBFeature,
     TransactionTestCase)
-from django.test.utils import override_settings
+from django.test.utils import override_settings, str_prefix
 from django.utils import six
 from django.utils.six.moves import xrange
 from django.utils import unittest
@@ -42,7 +43,7 @@ class OracleChecks(unittest.TestCase):
         # Check that '%' chars are escaped for query execution.
         name = '"SOME%NAME"'
         quoted_name = connection.ops.quote_name(name)
-        self.assertEquals(quoted_name % (), name)
+        self.assertEqual(quoted_name % (), name)
 
     @unittest.skipUnless(connection.vendor == 'oracle',
                          "No need to check Oracle cursor semantics")
@@ -143,11 +144,11 @@ class DateQuotingTest(TestCase):
         updated = datetime.datetime(2010, 2, 20)
         models.SchoolClass.objects.create(year=2009, last_updated=updated)
         years = models.SchoolClass.objects.dates('last_updated', 'year')
-        self.assertEqual(list(years), [datetime.datetime(2010, 1, 1, 0, 0)])
+        self.assertEqual(list(years), [datetime.date(2010, 1, 1)])
 
-    def test_django_extract(self):
+    def test_django_date_extract(self):
         """
-        Test the custom ``django_extract method``, in particular against fields
+        Test the custom ``django_date_extract method``, in particular against fields
         which clash with strings passed to it (e.g. 'day') - see #12818__.
 
         __: http://code.djangoproject.com/ticket/12818
@@ -159,24 +160,34 @@ class DateQuotingTest(TestCase):
         self.assertEqual(len(classes), 1)
 
 
+@override_settings(DEBUG=True)
 class LastExecutedQueryTest(TestCase):
-    @override_settings(DEBUG=True)
+
     def test_debug_sql(self):
         list(models.Tag.objects.filter(name="test"))
         sql = connection.queries[-1]['sql'].lower()
-        self.assertTrue(sql.startswith("select"))
+        self.assertIn("select", sql)
         self.assertIn(models.Tag._meta.db_table, sql)
 
     def test_query_encoding(self):
         """
         Test that last_executed_query() returns an Unicode string
         """
-        tags = models.Tag.objects.extra(select={'föö':1})
+        tags = models.Tag.objects.extra(select={'föö': 1})
         sql, params = tags.query.sql_with_params()
         cursor = tags.query.get_compiler('default').execute_sql(None)
         last_sql = cursor.db.ops.last_executed_query(cursor, sql, params)
         self.assertTrue(isinstance(last_sql, six.text_type))
 
+    @unittest.skipUnless(connection.vendor == 'sqlite',
+                         "This test is specific to SQLite.")
+    def test_no_interpolation_on_sqlite(self):
+        # Regression for #17158
+        # This shouldn't raise an exception
+        query = "SELECT strftime('%Y', 'now');"
+        connection.cursor().execute(query)
+        self.assertEqual(connection.queries[-1]['sql'],
+            str_prefix("QUERY = %(_)s\"SELECT strftime('%%Y', 'now');\" - PARAMS = ()"))
 
 class ParameterHandlingTest(TestCase):
     def test_bad_parameter_count(self):
@@ -362,6 +373,22 @@ class EscapingChecks(TestCase):
         self.assertTrue(int(response))
 
 
+class SqlliteAggregationTests(TestCase):
+    """
+    #19360: Raise NotImplementedError when aggregating on date/time fields.
+    """
+    @unittest.skipUnless(connection.vendor == 'sqlite',
+                         "No need to check SQLite aggregation semantics")
+    def test_aggregation(self):
+        for aggregate in (Sum, Avg, Variance, StdDev):
+            self.assertRaises(NotImplementedError,
+                models.Item.objects.all().aggregate, aggregate('time'))
+            self.assertRaises(NotImplementedError,
+                models.Item.objects.all().aggregate, aggregate('date'))
+            self.assertRaises(NotImplementedError,
+                models.Item.objects.all().aggregate, aggregate('last_modified'))
+
+
 class BackendTestCase(TestCase):
 
     def create_squares_with_executemany(self, args):
@@ -399,7 +426,6 @@ class BackendTestCase(TestCase):
             # same test for DebugCursorWrapper
             self.create_squares_with_executemany(args)
         self.assertEqual(models.Square.objects.count(), 9)
-
 
     def test_unicode_fetches(self):
         #6254: fetchone, fetchmany, fetchall return strings as unicode objects

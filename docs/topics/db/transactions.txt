@@ -48,10 +48,9 @@ you use the session middleware after the transaction middleware, session
 creation will be part of the transaction.
 
 The various cache middlewares are an exception:
-:class:`~django.middleware.cache.CacheMiddleware`,
-:class:`~django.middleware.cache.UpdateCacheMiddleware`, and
-:class:`~django.middleware.cache.FetchFromCacheMiddleware` are never affected.
-Even when using database caching, Django's cache backend uses its own
+``CacheMiddleware``, :class:`~django.middleware.cache.UpdateCacheMiddleware`,
+and :class:`~django.middleware.cache.FetchFromCacheMiddleware` are never
+affected. Even when using database caching, Django's cache backend uses its own
 database cursor (which is mapped to its own database connection internally).
 
 .. note::
@@ -237,9 +236,6 @@ of a transaction, rather than the full transaction. Savepoints are available
 with the PostgreSQL 8, Oracle and MySQL (when using the InnoDB storage engine)
 backends. Other backends provide the savepoint functions, but they're empty
 operations -- they don't actually do anything.
-
-.. versionchanged:: 1.4
-   Savepoint support for the MySQL backend was added in Django 1.4.
 
 Savepoints aren't especially useful if you are using the default
 ``autocommit`` behavior of Django. However, if you are using

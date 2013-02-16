@@ -16,11 +16,13 @@ import codecs
 
 from django import conf, bin, get_version
 from django.conf import settings
+from django.core.management import BaseCommand
 from django.db import connection
 from django.test.simple import DjangoTestSuiteRunner
 from django.utils import unittest
 from django.utils.encoding import force_str, force_text
 from django.utils._os import upath
+from django.utils.six import StringIO
 from django.test import LiveServerTestCase
 
 test_dir = os.path.dirname(os.path.dirname(upath(__file__)))
@@ -1279,6 +1281,31 @@ class CommandTypes(AdminScriptTestCase):
         self.assertNoOutput(err)
         self.assertOutput(out, "EXECUTE:BaseCommand labels=('testlabel',), options=[('option_a', 'x'), ('option_b', 'y'), ('option_c', '3'), ('pythonpath', None), ('settings', None), ('traceback', None), ('verbosity', '1')]")
 
+    def test_base_run_from_argv(self):
+        """
+        Test run_from_argv properly terminates even with custom execute() (#19665)
+        Also test proper traceback display.
+        """
+        command = BaseCommand()
+        command.execute = lambda args: args  # This will trigger TypeError
+
+        old_stderr = sys.stderr
+        sys.stderr = err = StringIO()
+        try:
+            with self.assertRaises(SystemExit):
+                command.run_from_argv(['', ''])
+            err_message = err.getvalue()
+            self.assertNotIn("Traceback", err_message)
+            self.assertIn("TypeError", err_message)
+
+            with self.assertRaises(SystemExit):
+                command.run_from_argv(['', '', '--traceback'])
+            err_message = err.getvalue()
+            self.assertIn("Traceback (most recent call last)", err_message)
+            self.assertIn("TypeError", err_message)
+        finally:
+            sys.stderr = old_stderr
+
     def test_noargs(self):
         "NoArg Commands can be executed"
         args = ['noargs_command']
@@ -1430,13 +1457,15 @@ class StartProject(LiveServerTestCase, AdminScriptTestCase):
 
     def test_invalid_project_name(self):
         "Make sure the startproject management command validates a project name"
-        args = ['startproject', '7testproject']
-        testproject_dir = os.path.join(test_dir, '7testproject')
-        self.addCleanup(shutil.rmtree, testproject_dir, True)
+        for bad_name in ('7testproject', '../testproject'):
+            args = ['startproject', bad_name]
+            testproject_dir = os.path.join(test_dir, bad_name)
+            self.addCleanup(shutil.rmtree, testproject_dir, True)
 
-        out, err = self.run_django_admin(args)
-        self.assertOutput(err, "Error: '7testproject' is not a valid project name. Please make sure the name begins with a letter or underscore.")
-        self.assertFalse(os.path.exists(testproject_dir))
+            out, err = self.run_django_admin(args)
+            self.assertOutput(err, "Error: '%s' is not a valid project name. "
+                "Please make sure the name begins with a letter or underscore." % bad_name)
+            self.assertFalse(os.path.exists(testproject_dir))
 
     def test_simple_project_different_directory(self):
         "Make sure the startproject management command creates a project in a specific directory"

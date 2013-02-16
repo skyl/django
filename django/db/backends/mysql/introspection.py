@@ -1,7 +1,7 @@
 import re
 from .base import FIELD_TYPE
 
-from django.db.backends import BaseDatabaseIntrospection
+from django.db.backends import BaseDatabaseIntrospection, FieldInfo
 
 
 foreign_key_re = re.compile(r"\sCONSTRAINT `[^`]*` FOREIGN KEY \(`([^`]*)`\) REFERENCES `([^`]*)` \(`([^`]*)`\)")
@@ -21,6 +21,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         FIELD_TYPE.LONGLONG: 'BigIntegerField',
         FIELD_TYPE.SHORT: 'IntegerField',
         FIELD_TYPE.STRING: 'CharField',
+        FIELD_TYPE.TIME: 'TimeField',
         FIELD_TYPE.TIMESTAMP: 'DateTimeField',
         FIELD_TYPE.TINY: 'IntegerField',
         FIELD_TYPE.TINY_BLOB: 'TextField',
@@ -47,7 +48,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         length_map = dict(cursor.fetchall())
 
         cursor.execute("SELECT * FROM %s LIMIT 1" % self.connection.ops.quote_name(table_name))
-        return [line[:3] + (length_map.get(line[0], line[3]),) + line[4:]
+        return [FieldInfo(*(line[:3] + (length_map.get(line[0], line[3]),) + line[4:]))
             for line in cursor.description]
 
     def _name_to_index(self, cursor, table_name):

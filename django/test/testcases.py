@@ -1,12 +1,13 @@
 from __future__ import unicode_literals
 
+from copy import copy
 import difflib
+import errno
+from functools import wraps
 import json
 import os
 import re
 import sys
-from copy import copy
-from functools import wraps
 try:
     from urllib.parse import urlsplit, urlunsplit
 except ImportError:     # Python 2
@@ -14,7 +15,7 @@ except ImportError:     # Python 2
 import select
 import socket
 import threading
-import errno
+import warnings
 
 from django.conf import settings
 from django.contrib.staticfiles.handlers import StaticFilesHandler
@@ -36,8 +37,7 @@ from django.test import _doctest as doctest
 from django.test.client import Client
 from django.test.html import HTMLParseError, parse_html
 from django.test.signals import template_rendered
-from django.test.utils import (get_warnings_state, restore_warnings_state,
-    override_settings, compare_xml, strip_quotes)
+from django.test.utils import (override_settings, compare_xml, strip_quotes)
 from django.test.utils import ContextList
 from django.utils import unittest as ut2
 from django.utils.encoding import force_text
@@ -70,6 +70,7 @@ real_rollback = transaction.rollback
 real_enter_transaction_management = transaction.enter_transaction_management
 real_leave_transaction_management = transaction.leave_transaction_management
 real_managed = transaction.managed
+real_abort = transaction.abort
 
 def nop(*args, **kwargs):
     return
@@ -80,6 +81,7 @@ def disable_transaction_methods():
     transaction.enter_transaction_management = nop
     transaction.leave_transaction_management = nop
     transaction.managed = nop
+    transaction.abort = nop
 
 def restore_transaction_methods():
     transaction.commit = real_commit
@@ -87,6 +89,7 @@ def restore_transaction_methods():
     transaction.enter_transaction_management = real_enter_transaction_management
     transaction.leave_transaction_management = real_leave_transaction_management
     transaction.managed = real_managed
+    transaction.abort = real_abort
 
 
 def assert_and_parse_html(self, html, user_msg, msg):
@@ -241,6 +244,11 @@ class _AssertTemplateNotUsedContext(_AssertTemplateUsedContext):
 
 
 class SimpleTestCase(ut2.TestCase):
+
+    _warn_txt = ("save_warnings_state/restore_warnings_state "
+        "django.test.*TestCase methods are deprecated. Use Python's "
+        "warnings.catch_warnings context manager instead.")
+
     def __call__(self, result=None):
         """
         Wrapper around default __call__ method to perform common Django test
@@ -279,14 +287,16 @@ class SimpleTestCase(ut2.TestCase):
         """
         Saves the state of the warnings module
         """
-        self._warnings_state = get_warnings_state()
+        warnings.warn(self._warn_txt, DeprecationWarning, stacklevel=2)
+        self._warnings_state = warnings.filters[:]
 
     def restore_warnings_state(self):
         """
         Restores the state of the warnings module to the state
         saved by save_warnings_state()
         """
-        restore_warnings_state(self._warnings_state)
+        warnings.warn(self._warn_txt, DeprecationWarning, stacklevel=2)
+        warnings.filters = self._warnings_state[:]
 
     def settings(self, **kwargs):
         """
@@ -392,6 +402,32 @@ class SimpleTestCase(ut2.TestCase):
             standardMsg = '%s == %s' % (
                 safe_repr(dom1, True), safe_repr(dom2, True))
             self.fail(self._formatMessage(msg, standardMsg))
+
+    def assertInHTML(self, needle, haystack, count = None, msg_prefix=''):
+        needle = assert_and_parse_html(self, needle, None,
+            'First argument is not valid HTML:')
+        haystack = assert_and_parse_html(self, haystack, None,
+            'Second argument is not valid HTML:')
+        real_count = haystack.count(needle)
+        if count is not None:
+            self.assertEqual(real_count, count,
+                msg_prefix + "Found %d instances of '%s' in response"
+                " (expected %d)" % (real_count, needle, count))
+        else:
+            self.assertTrue(real_count != 0,
+                msg_prefix + "Couldn't find '%s' in response" % needle)
+
+    def assertJSONEqual(self, raw, expected_data, msg=None):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            self.fail("First argument is not valid JSON: %r" % raw)
+        if isinstance(expected_data, six.string_types):
+            try:
+                expected_data = json.loads(expected_data)
+            except ValueError:
+                self.fail("Second argument is not valid JSON: %r" % expected_data)
+        self.assertEqual(data, expected_data, msg=msg)
 
     def assertXMLEqual(self, xml1, xml2, msg=None):
         """
@@ -565,7 +601,7 @@ class TransactionTestCase(SimpleTestCase):
                 " code was %d (expected %d)" %
                     (response.status_code, status_code))
 
-            url = response['Location']
+            url = response.url
             scheme, netloc, path, query, fragment = urlsplit(url)
 
             redirect_response = response.client.get(path, QueryDict(query))
@@ -615,8 +651,6 @@ class TransactionTestCase(SimpleTestCase):
         else:
             content = response.content
         content = content.decode(response._charset)
-        # Avoid ResourceWarning about unclosed files.
-        response.close()
         if html:
             content = assert_and_parse_html(self, content, None,
                 "Response's content is not valid HTML:")

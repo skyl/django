@@ -6,11 +6,15 @@ import warnings
 from datetime import datetime, timedelta
 from io import BytesIO
 
+from django.db import connection, connections, DEFAULT_DB_ALIAS
+from django.core import signals
 from django.core.exceptions import SuspiciousOperation
 from django.core.handlers.wsgi import WSGIRequest, LimitedStream
 from django.http import HttpRequest, HttpResponse, parse_cookie, build_request_repr, UnreadablePostError
+from django.test import TransactionTestCase
 from django.test.client import FakePayload
 from django.test.utils import override_settings, str_prefix
+from django.utils import six
 from django.utils import unittest
 from django.utils.http import cookie_date, urlencode
 from django.utils.timezone import utc
@@ -56,6 +60,16 @@ class RequestsTests(unittest.TestCase):
         self.assertEqual(build_request_repr(request), repr(request))
         self.assertEqual(build_request_repr(request, path_override='/otherpath/', GET_override={'a': 'b'}, POST_override={'c': 'd'}, COOKIES_override={'e': 'f'}, META_override={'g': 'h'}),
                          str_prefix("<WSGIRequest\npath:/otherpath/,\nGET:{%(_)s'a': %(_)s'b'},\nPOST:{%(_)s'c': %(_)s'd'},\nCOOKIES:{%(_)s'e': %(_)s'f'},\nMETA:{%(_)s'g': %(_)s'h'}>"))
+
+    def test_wsgirequest_path_info(self):
+        def wsgi_str(path_info):
+            path_info = path_info.encode('utf-8')           # Actual URL sent by the browser (bytestring)
+            if six.PY3:
+                path_info = path_info.decode('iso-8859-1')  # Value in the WSGI environ dict (native string)
+            return path_info
+        # Regression for #19468
+        request = WSGIRequest({'PATH_INFO': wsgi_str("/سلام/"), 'REQUEST_METHOD': 'get', 'wsgi.input': BytesIO(b'')})
+        self.assertEqual(request.path, "/سلام/")
 
     def test_parse_cookie(self):
         self.assertEqual(parse_cookie('invalid@key=true'), {})
@@ -496,20 +510,6 @@ class RequestsTests(unittest.TestCase):
         self.assertEqual(request.read(13), b'--boundary\r\nC')
         self.assertEqual(request.POST, {'name': ['value']})
 
-    def test_raw_post_data_returns_body(self):
-        """
-        HttpRequest.raw_post_body should be the same as HttpRequest.body
-        """
-        payload = FakePayload('Hello There!')
-        request = WSGIRequest({
-            'REQUEST_METHOD': 'POST',
-            'CONTENT_LENGTH': len(payload),
-            'wsgi.input': payload,
-        })
-
-        with warnings.catch_warnings(record=True):
-            self.assertEqual(request.body, request.raw_post_data)
-
     def test_POST_connection_error(self):
         """
         If wsgi.input.read() raises an exception while trying to read() the
@@ -525,8 +525,46 @@ class RequestsTests(unittest.TestCase):
                                'CONTENT_LENGTH': len(payload),
                                'wsgi.input': ExplodingBytesIO(payload)})
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            with self.assertRaises(UnreadablePostError):
-                request.raw_post_data
-            self.assertEqual(len(w), 1)
+        with self.assertRaises(UnreadablePostError):
+            request.body
+
+class TransactionRequestTests(TransactionTestCase):
+    def test_request_finished_db_state(self):
+        # The GET below will not succeed, but it will give a response with
+        # defined ._handler_class. That is needed for sending the
+        # request_finished signal.
+        response = self.client.get('/')
+        # Make sure there is an open connection
+        connection.cursor()
+        connection.enter_transaction_management()
+        connection.managed(True)
+        signals.request_finished.send(sender=response._handler_class)
+        # In-memory sqlite doesn't actually close connections.
+        if connection.vendor != 'sqlite':
+            self.assertIs(connection.connection, None)
+        self.assertEqual(len(connection.transaction_state), 0)
+
+    @unittest.skipIf(connection.vendor == 'sqlite',
+                     'This test will close the connection, in-memory '
+                     'sqlite connections must not be closed.')
+    def test_request_finished_failed_connection(self):
+        conn = connections[DEFAULT_DB_ALIAS]
+        conn.enter_transaction_management()
+        conn.managed(True)
+        conn.set_dirty()
+        # Test that the rollback doesn't succeed (for example network failure
+        # could cause this).
+        def fail_horribly():
+            raise Exception("Horrible failure!")
+        conn._rollback = fail_horribly
+        try:
+            with self.assertRaises(Exception):
+                signals.request_finished.send(sender=self.__class__)
+            # The connection's state wasn't cleaned up
+            self.assertTrue(len(connection.transaction_state), 1)
+        finally:
+            del conn._rollback
+        # The connection will be cleaned on next request where the conn
+        # works again.
+        signals.request_finished.send(sender=self.__class__)
+        self.assertEqual(len(connection.transaction_state), 0)

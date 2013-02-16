@@ -327,8 +327,8 @@ a primary key of 1, Django will raise ``Entry.DoesNotExist``.
 
 Similarly, Django will complain if more than one item matches the
 :meth:`~django.db.models.query.QuerySet.get` query. In this case, it will raise
-``MultipleObjectsReturned``, which again is an attribute of the model class
-itself.
+:exc:`~django.core.exceptions.MultipleObjectsReturned`, which again is an
+attribute of the model class itself.
 
 
 Other QuerySet methods
@@ -412,14 +412,13 @@ translates (roughly) into the following SQL::
 
    .. _`Keyword Arguments`: http://docs.python.org/tutorial/controlflow.html#keyword-arguments
 
-.. versionchanged:: 1.4
-    The field specified in a lookup has to be the name of a model field.
-    There's one exception though, in case of a
-    :class:`~django.db.models.ForeignKey` you can specify the field
-    name suffixed with ``_id``. In this case, the value parameter is expected
-    to contain the raw value of the foreign model's primary key. For example:
+The field specified in a lookup has to be the name of a model field. There's
+one exception though, in case of a :class:`~django.db.models.ForeignKey` you
+can specify the field name suffixed with ``_id``. In this case, the value
+parameter is expected to contain the raw value of the foreign model's primary
+key. For example:
 
-        >>> Entry.objects.filter(blog_id__exact=4)
+    >>> Entry.objects.filter(blog_id__exact=4)
 
 If you pass an invalid keyword argument, a lookup function will raise
 ``TypeError``.
@@ -601,6 +600,8 @@ relation may end up filtering on different linked objects.
 Filters can reference fields on the model
 -----------------------------------------
 
+.. class:: F
+
 In the examples given so far, we have constructed filters that compare
 the value of a model field with a constant. But what if you want to compare
 the value of a model field with another field on the same model?
@@ -754,6 +755,8 @@ To avoid this problem, simply save the
 
 Complex lookups with Q objects
 ==============================
+
+.. class:: Q
 
 Keyword argument queries -- in :meth:`~django.db.models.query.QuerySet.filter`,
 etc. -- are "AND"ed together. If you need to execute more complex queries (for

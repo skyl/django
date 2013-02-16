@@ -11,6 +11,7 @@ from django.test import TestCase
 from django.test.utils import str_prefix
 from django.utils.datastructures import MultiValueDict, MergeDict
 from django.utils.safestring import mark_safe
+from django.utils import six
 
 
 class Person(Form):
@@ -136,11 +137,7 @@ class FormsTestCase(TestCase):
         self.assertEqual(p.errors['first_name'], ['This field is required.'])
         self.assertEqual(p.errors['birthday'], ['This field is required.'])
         self.assertFalse(p.is_valid())
-        self.assertHTMLEqual(p.errors.as_ul(), '<ul class="errorlist"><li>first_name<ul class="errorlist"><li>This field is required.</li></ul></li><li>birthday<ul class="errorlist"><li>This field is required.</li></ul></li></ul>')
-        self.assertEqual(p.errors.as_text(), """* first_name
-  * This field is required.
-* birthday
-  * This field is required.""")
+        self.assertDictEqual(p.errors, {'birthday': ['This field is required.'], 'first_name': ['This field is required.']})
         self.assertEqual(p.cleaned_data, {'last_name': 'Lennon'})
         self.assertEqual(p['first_name'].errors, ['This field is required.'])
         self.assertHTMLEqual(p['first_name'].errors.as_ul(), '<ul class="errorlist"><li>This field is required.</li></ul>')
@@ -248,11 +245,11 @@ class FormsTestCase(TestCase):
             get_spam = BooleanField()
 
         f = SignupForm(auto_id=False)
-        self.assertHTMLEqual(str(f['email']), '<input type="text" name="email" />')
+        self.assertHTMLEqual(str(f['email']), '<input type="email" name="email" />')
         self.assertHTMLEqual(str(f['get_spam']), '<input type="checkbox" name="get_spam" />')
 
         f = SignupForm({'email': 'test@example.com', 'get_spam': True}, auto_id=False)
-        self.assertHTMLEqual(str(f['email']), '<input type="text" name="email" value="test@example.com" />')
+        self.assertHTMLEqual(str(f['email']), '<input type="email" name="email" value="test@example.com" />')
         self.assertHTMLEqual(str(f['get_spam']), '<input checked="checked" type="checkbox" name="get_spam" />')
 
         # 'True' or 'true' should be rendered without a value attribute
@@ -1495,7 +1492,7 @@ class FormsTestCase(TestCase):
                 form = UserRegistration(auto_id=False)
 
             if form.is_valid():
-                return 'VALID: %r' % form.cleaned_data
+                return 'VALID: %r' % sorted(six.iteritems(form.cleaned_data))
 
             t = Template('<form action="" method="post">\n<table>\n{{ form }}\n</table>\n<input type="submit" />\n</form>')
             return t.render(Context({'form': form}))
@@ -1520,7 +1517,8 @@ class FormsTestCase(TestCase):
 <input type="submit" />
 </form>""")
         # Case 3: POST with valid data (the success message).)
-        self.assertHTMLEqual(my_function('POST', {'username': 'adrian', 'password1': 'secret', 'password2': 'secret'}), str_prefix("VALID: {'username': %(_)s'adrian', 'password1': %(_)s'secret', 'password2': %(_)s'secret'}"))
+        self.assertEqual(my_function('POST', {'username': 'adrian', 'password1': 'secret', 'password2': 'secret'}),
+                    str_prefix("VALID: [('password1', %(_)s'secret'), ('password2', %(_)s'secret'), ('username', %(_)s'adrian')]"))
 
     def test_templates_with_forms(self):
         class UserRegistration(Form):
@@ -1741,7 +1739,7 @@ class FormsTestCase(TestCase):
 <option value="2">Yes</option>
 <option value="3">No</option>
 </select></li>
-<li><label for="id_email">Email:</label> <input type="text" name="email" id="id_email" /></li>
+<li><label for="id_email">Email:</label> <input type="email" name="email" id="id_email" /></li>
 <li class="required error"><ul class="errorlist"><li>This field is required.</li></ul><label for="id_age">Age:</label> <input type="text" name="age" id="id_age" /></li>""")
 
         self.assertHTMLEqual(p.as_p(), """<ul class="errorlist"><li>This field is required.</li></ul>
@@ -1751,7 +1749,7 @@ class FormsTestCase(TestCase):
 <option value="2">Yes</option>
 <option value="3">No</option>
 </select></p>
-<p><label for="id_email">Email:</label> <input type="text" name="email" id="id_email" /></p>
+<p><label for="id_email">Email:</label> <input type="email" name="email" id="id_email" /></p>
 <ul class="errorlist"><li>This field is required.</li></ul>
 <p class="required error"><label for="id_age">Age:</label> <input type="text" name="age" id="id_age" /></p>""")
 
@@ -1761,7 +1759,7 @@ class FormsTestCase(TestCase):
 <option value="2">Yes</option>
 <option value="3">No</option>
 </select></td></tr>
-<tr><th><label for="id_email">Email:</label></th><td><input type="text" name="email" id="id_email" /></td></tr>
+<tr><th><label for="id_email">Email:</label></th><td><input type="email" name="email" id="id_email" /></td></tr>
 <tr class="required error"><th><label for="id_age">Age:</label></th><td><ul class="errorlist"><li>This field is required.</li></ul><input type="text" name="age" id="id_age" /></td></tr>""")
 
     def test_label_split_datetime_not_displayed(self):

@@ -9,6 +9,8 @@ from django.contrib.auth.tests import CustomUser
 from django.contrib.auth.tests.utils import skipIfCustomUser
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.management.validation import get_validation_errors
+from django.db.models.loading import get_app
 from django.test import TestCase
 from django.test.utils import override_settings
 from django.utils import six
@@ -125,7 +127,7 @@ class CreatesuperuserManagementCommandTestCase(TestCase):
             email="joe@somewhere.org",
             stdout=new_io
         )
-        u = User.objects.get(username="joe+admin@somewhere.org")
+        u = User._default_manager.get(username="joe+admin@somewhere.org")
         self.assertEqual(u.email, 'joe@somewhere.org')
         self.assertFalse(u.has_usable_password())
 
@@ -145,7 +147,7 @@ class CreatesuperuserManagementCommandTestCase(TestCase):
         )
         command_output = new_io.getvalue().strip()
         self.assertEqual(command_output, 'Superuser created successfully.')
-        u = CustomUser.objects.get(email="joe@somewhere.org")
+        u = CustomUser._default_manager.get(email="joe@somewhere.org")
         self.assertEqual(u.date_of_birth, date(1976, 4, 1))
 
         # created password should be unusable
@@ -167,7 +169,23 @@ class CreatesuperuserManagementCommandTestCase(TestCase):
                 skip_validation=True
             )
 
-        self.assertEqual(CustomUser.objects.count(), 0)
+        self.assertEqual(CustomUser._default_manager.count(), 0)
+
+
+class CustomUserModelValidationTestCase(TestCase):
+    @override_settings(AUTH_USER_MODEL='auth.CustomUserBadRequiredFields')
+    def test_username_not_in_required_fields(self):
+        "USERNAME_FIELD should not appear in REQUIRED_FIELDS."
+        new_io = StringIO()
+        get_validation_errors(new_io, get_app('auth'))
+        self.assertIn("The field named as the USERNAME_FIELD should not be included in REQUIRED_FIELDS on a swappable User model.", new_io.getvalue())
+
+    @override_settings(AUTH_USER_MODEL='auth.CustomUserNonUniqueUsername')
+    def test_username_non_unique(self):
+        "A non-unique USERNAME_FIELD should raise a model validation error."
+        new_io = StringIO()
+        get_validation_errors(new_io, get_app('auth'))
+        self.assertIn("The USERNAME_FIELD must be unique. Add unique=True to the field parameters.", new_io.getvalue())
 
 
 class PermissionDuplicationTestCase(TestCase):
@@ -186,7 +204,7 @@ class PermissionDuplicationTestCase(TestCase):
         # check duplicated default permission
         models.Permission._meta.permissions = [
            ('change_permission', 'Can edit permission (duplicate)')]
-        self.assertRaisesRegexp(CommandError,
+        six.assertRaisesRegex(self, CommandError,
             "The permission codename 'change_permission' clashes with a "
             "builtin permission for model 'auth.Permission'.",
             create_permissions, models, [], verbosity=0)
@@ -197,7 +215,7 @@ class PermissionDuplicationTestCase(TestCase):
             ('other_one', 'Some other permission'),
             ('my_custom_permission', 'Some permission with duplicate permission code'),
         ]
-        self.assertRaisesRegexp(CommandError,
+        six.assertRaisesRegex(self, CommandError,
             "The permission codename 'my_custom_permission' is duplicated for model "
             "'auth.Permission'.",
             create_permissions, models, [], verbosity=0)

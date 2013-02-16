@@ -1,7 +1,9 @@
 from functools import update_wrapper
 
 from django.contrib import admin
+from django.core.urlresolvers import reverse
 from django.db import models
+from django.http import HttpResponseRedirect
 from django.utils.encoding import python_2_unicode_compatible
 
 
@@ -40,7 +42,7 @@ class ActionAdmin(admin.ModelAdmin):
                 return self.admin_site.admin_view(view)(*args, **kwargs)
             return update_wrapper(wrapper, view)
 
-        info = self.model._meta.app_label, self.model._meta.module_name
+        info = self.model._meta.app_label, self.model._meta.model_name
 
         view_name = '%s_%s_add' % info
 
@@ -49,41 +51,30 @@ class ActionAdmin(admin.ModelAdmin):
         ) + self.remove_url(view_name)
 
 
-admin.site.register(Action, ActionAdmin)
-
-
 class Person(models.Model):
-    nick = models.CharField(max_length=20)
-
-
-class PersonAdmin(admin.ModelAdmin):
-    """A custom ModelAdmin that customizes the deprecated post_url_continue
-    argument to response_add()"""
-    def response_add(self, request, obj, post_url_continue='../%s/continue/',
-                     continue_url=None, add_url=None, hasperm_url=None,
-                     noperm_url=None):
-        return super(PersonAdmin, self).response_add(request, obj,
-                                                     post_url_continue,
-                                                     continue_url, add_url,
-                                                     hasperm_url, noperm_url)
-
-
-admin.site.register(Person, PersonAdmin)
-
-
-class City(models.Model):
     name = models.CharField(max_length=20)
 
+class PersonAdmin(admin.ModelAdmin):
 
-class CityAdmin(admin.ModelAdmin):
-    """A custom ModelAdmin that redirects to the changelist when the user
-    presses the 'Save and add another' button when adding a model instance."""
-    def response_add(self, request, obj,
-                     add_another_url='admin:admin_custom_urls_city_changelist',
-                     **kwargs):
-        return super(CityAdmin, self).response_add(request, obj,
-                                                   add_another_url=add_another_url,
-                                                   **kwargs)
+    def response_post_save_add(self, request, obj):
+        return HttpResponseRedirect(
+            reverse('admin:admin_custom_urls_person_history', args=[obj.pk]))
+
+    def response_post_save_change(self, request, obj):
+        return HttpResponseRedirect(
+            reverse('admin:admin_custom_urls_person_delete', args=[obj.pk]))
 
 
-admin.site.register(City, CityAdmin)
+class Car(models.Model):
+    name = models.CharField(max_length=20)
+
+class CarAdmin(admin.ModelAdmin):
+
+    def response_add(self, request, obj, post_url_continue=None):
+        return super(CarAdmin, self).response_add(
+            request, obj, post_url_continue=reverse('admin:admin_custom_urls_car_history', args=[obj.pk]))
+
+
+admin.site.register(Action, ActionAdmin)
+admin.site.register(Person, PersonAdmin)
+admin.site.register(Car, CarAdmin)
