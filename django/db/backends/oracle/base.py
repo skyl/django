@@ -472,11 +472,11 @@ class _UninitializedOperatorsDescriptor(object):
 
 
 class PoolHolder(object):
-    pool = None
+    pools = {}
 
     @classmethod
-    def get(cls, settings_dict):
-        if cls.pool is None:
+    def get(cls, alias, settings_dict):
+        if alias not in cls.pools:
             pool_settings = settings_dict["SESSION_POOL"]
 
             if settings_dict.get('PORT', '').strip():
@@ -487,7 +487,7 @@ class PoolHolder(object):
                 )
             else:
                 dsn = settings_dict.get('NAME', '')
-            cls.pool = Database.SessionPool(
+            cls.pools[alias] = Database.SessionPool(
                 settings_dict['USER'],
                 settings_dict['PASSWORD'],
                 dsn,
@@ -496,11 +496,12 @@ class PoolHolder(object):
                 pool_settings.get('INCREMENT', 1),
                 threaded=pool_settings.get('THREADED', True)
             )
-        return cls.pool
+        return cls.pools[alias]
 
     @classmethod
-    def release(cls, connection):
-        return cls.pool.release(connection)
+    def release(cls, alias, connection):
+        pool = cls.pools.get(alias)
+        return pool.release(connection)
 
 
 class DatabaseWrapper(BaseDatabaseWrapper):
@@ -547,7 +548,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
         # SessionPool
         if "SESSION_POOL" in self.settings_dict:
-            self.pool = PoolHolder.get(self.settings_dict)
+            self.pool = PoolHolder.get(self.alias, self.settings_dict)
 
         else:
             self.pool = None
@@ -680,7 +681,8 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     def close(self):
         if self._valid_connection() and self.is_pooled:
-            PoolHolder.release(self.connection)
+            self.rollback()
+            PoolHolder.release(self.alias, self.connection)
             self.connection = None
         super(DatabaseWrapper, self).close()
 
