@@ -477,6 +477,38 @@ class _UninitializedOperatorsDescriptor(object):
         return instance.__dict__['operators']
 
 
+class PoolHolder(object):
+    pool = None
+
+    @classmethod
+    def get(cls, settings_dict):
+        if cls.pool is None:
+            pool_settings = settings_dict["SESSION_POOL"]
+
+            if settings_dict.get('PORT', '').strip():
+                dsn = Database.makedsn(
+                    settings_dict['HOST'],
+                    int(settings_dict['PORT']),
+                    settings_dict.get('NAME', '')
+                )
+            else:
+                dsn = settings_dict.get('NAME', '')
+            cls.pool = Database.SessionPool(
+                settings_dict['USER'],
+                settings_dict['PASSWORD'],
+                dsn,
+                pool_settings.get('MIN_SESSIONS', 2),
+                pool_settings.get('MAX_SESSIONS', 4),
+                pool_settings.get('INCREMENT', 1),
+                threaded=pool_settings.get('THREADED', True)
+            )
+        return cls.pool
+
+    @classmethod
+    def release(cls, connection):
+        return cls.pool.release(connection)
+
+
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'oracle'
     operators = _UninitializedOperatorsDescriptor()
@@ -521,31 +553,11 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
         # SessionPool
         if "SESSION_POOL" in self.settings_dict:
-            pool_settings = self.settings_dict["SESSION_POOL"]
+            self.pool = PoolHolder.get(self.settings_dict)
 
-            if self.settings_dict.get('PORT', '').strip():
-                dsn = Database.makedsn(
-                    self.settings_dict['HOST'],
-                    int(self.settings_dict['PORT']),
-                    self.settings_dict.get('NAME', '')
-                )
-            else:
-                dsn = self.settings_dict.get('NAME', '')
-
-            self.pool = Database.SessionPool(
-                self.settings_dict['USER'],
-                self.settings_dict['PASSWORD'],
-                dsn,
-                pool_settings.get('MIN_SESSIONS', 2),
-                pool_settings.get('MAX_SESSIONS', 4),
-                pool_settings.get('INCREMENT', 1),
-                threaded=pool_settings.get('THREADED', True)
-            )
         else:
             self.pool = None
         self.is_pooled = self.pool is not None
-        print "DatabaseWrapper __init__"
-        print "pool", self.pool
 
     def check_constraints(self, table_names=None):
         """
@@ -579,9 +591,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         if 'use_returning_into' in conn_params:
             del conn_params['use_returning_into']
         if self.is_pooled:
-            print "IS POOLED", self.pool
             conn_params['pool'] = self.pool
-        print "RETURNING CONNECTION PARAMS!"
         return conn_params
 
     def get_new_connection(self, conn_params):
@@ -673,6 +683,12 @@ class DatabaseWrapper(BaseDatabaseWrapper):
                    and x.code == 2091 and 'ORA-02291' in x.message:
                     six.reraise(utils.IntegrityError, utils.IntegrityError(*tuple(e.args)), sys.exc_info()[2])
                 six.reraise(utils.DatabaseError, utils.DatabaseError(*tuple(e.args)), sys.exc_info()[2])
+
+    def close(self):
+        if self._valid_connection() and self.is_pooled:
+            PoolHolder.release(self.connection)
+            self.connection = None
+        super(DatabaseWrapper, self).close()
 
 
 class OracleParam(object):
