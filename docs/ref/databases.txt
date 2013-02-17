@@ -629,6 +629,30 @@ recognizes the SID ("xe" in this example), then fill in both
 You should supply both :setting:`HOST` and :setting:`PORT`, or leave both
 as empty strings.
 
+Session Pool
+------------
+You may use a ``cx_Oracle.SessionPool`` to reduce the overhead of creating
+connections with each request. Using a session pool can greatly increase the
+performance of your web application. To use the session pool with Oracle,
+simply add a `SESSION_POOL` key to a settings dictionary for a database
+alias. For instance::
+
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.oracle',
+            'NAME': 'xe',
+            'USER': 'a_user',
+            'PASSWORD': 'a_password',
+            'HOST': '',
+            'PORT': '',
+            'SESSION_POOL': {
+                'MIN_SESSIONS': 1,
+                'MAX_SESSIONS': 4,
+                'INCREMENT': 1,
+            }
+        }
+    }
+
 Threaded option
 ----------------
 
