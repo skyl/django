@@ -681,7 +681,7 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     def close(self):
         if self._valid_connection() and self.is_pooled:
-            self.rollback()
+            self.connection.rollback()
             PoolHolder.release(self.alias, self.connection)
             self.connection = None
         super(DatabaseWrapper, self).close()
