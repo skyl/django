@@ -591,7 +591,16 @@ class DatabaseWrapper(BaseDatabaseWrapper):
 
     def get_new_connection(self, conn_params):
         conn_string = convert_unicode(self._connect_string())
-        return Database.connect(conn_string, **conn_params)
+        connection = Database.connect(conn_string, **conn_params)
+        if self.is_pooled:
+            try:
+                connection.ping()
+                return connection
+            except DatabaseError:
+                self.pool.drop(connection)
+                return self.get_new_connection(conn_params)
+        else:
+            return connection
 
     def init_connection_state(self):
         cursor = self.create_cursor(self.connection)
