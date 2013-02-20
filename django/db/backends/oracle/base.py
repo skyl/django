@@ -491,7 +491,7 @@ class PoolHolder(object):
                 settings_dict['USER'],
                 settings_dict['PASSWORD'],
                 dsn,
-                pool_settings.get('MIN_SESSIONS', 2),
+                pool_settings.get('MIN_SESSIONS', 1),
                 pool_settings.get('MAX_SESSIONS', 4),
                 pool_settings.get('INCREMENT', 1),
                 threaded=pool_settings.get('THREADED', True)
@@ -585,22 +585,38 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         conn_params = self.settings_dict['OPTIONS'].copy()
         if 'use_returning_into' in conn_params:
             del conn_params['use_returning_into']
-        if self.is_pooled:
-            conn_params['pool'] = self.pool
         return conn_params
 
-    def get_new_connection(self, conn_params):
-        conn_string = convert_unicode(self._connect_string())
-        connection = Database.connect(conn_string, **conn_params)
-        if self.is_pooled:
+    def _acquire_connection_from_pool(self):
+        """
+        Get a connection from the connection pool.
+        Make sure it's a valid connection (using ping()) before returning it.
+        """
+        connection_ok = False
+        sanity_check = 0
+        sanity_threshold = self.settings_dict['SESSION_POOL'].get('MAX_SESSIONS', 4)
+
+        while not connection_ok:
+            new_conn = self.pool.acquire()
             try:
-                connection.ping()
-                return connection
-            except DatabaseError:
-                self.pool.drop(connection)
-                return self.get_new_connection(conn_params)
+                new_conn.ping()
+                connection_ok = True
+            except Database.Error, err:
+                sanity_check += 1
+                if sanity_check > sanity_threshold:
+                    raise Exception(
+                        'Could not get a valid/alive connection '
+                        'from the connection pool. %s' % err)
+                self.pool.drop(new_conn)
+        return new_conn
+
+    def get_new_connection(self, conn_params):
+        if self.is_pooled:
+            connection = self._acquire_connection_from_pool()
         else:
-            return connection
+            conn_string = convert_unicode(self._connect_string())
+            connection = Database.connect(conn_string, **conn_params)
+        return connection
 
     def init_connection_state(self):
         cursor = self.create_cursor(self.connection)
